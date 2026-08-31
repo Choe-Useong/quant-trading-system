@@ -1,0 +1,92 @@
+{
+  "rank_momentum": {
+    "source": "trade_price",
+    "steps": [
+      {
+        "kind": "momentum",
+        "params": {
+          "window": "{momentum_window}"
+        }
+      },
+      {
+        "kind": "cross_percentile",
+        "params": {
+          "descending": false
+        }
+      },
+      {
+        "kind": "rolling_mean",
+        "params": {
+          "window": "{rank_avg_window}"
+        }
+      }
+    ],
+    "default_column_name": "rank_mom_{momentum_window}_{rank_avg_window}"
+  },
+  "gaussian_momentum": {
+    "source": "trade_price",
+    "steps": [
+      {
+        "kind": "simple_return",
+        "params": {
+          "window": "{ret_window}"
+        }
+      },
+      {
+        "kind": "rolling_zscore",
+        "params": {
+          "window": "{z_window}"
+        }
+      },
+      {
+        "kind": "gaussian_signed"
+      }
+    ],
+    "default_column_name": "gauss_{ret_window}_{z_window}"
+  },
+  "impact_illiquidity": {
+    "source": "trade_price",
+    "steps": [
+      {
+        "kind": "simple_return",
+        "params": {
+          "window": 1
+        }
+      },
+      {
+        "kind": "abs"
+      },
+      {
+        "kind": "ratio_to_reference",
+        "params": {
+          "reference": "candle_acc_trade_price"
+        }
+      },
+      {
+        "kind": "rolling_mean",
+        "params": {
+          "window": "{avg_window}"
+        }
+      }
+    ],
+    "default_column_name": "impact_{avg_window}"
+  },
+  "turnover_rank_persist": {
+    "source": "candle_acc_trade_price",
+    "steps": [
+      {
+        "kind": "cross_percentile",
+        "params": {
+          "descending": false
+        }
+      },
+      {
+        "kind": "rolling_mean",
+        "params": {
+          "window": "{avg_window}"
+        }
+      }
+    ],
+    "default_column_name": "turn_rank_{avg_window}"
+  }
+}

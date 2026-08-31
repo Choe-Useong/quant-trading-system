@@ -1,0 +1,14 @@
+{
+  "output_column": "custom_score",
+  "rules": [
+    {
+      "market": "KRW-BTC",
+      "mode": "all_true",
+      "components": [
+        {
+          "feature_column": "sma20_gt_sma200"
+        }
+      ]
+    }
+  ]
+}

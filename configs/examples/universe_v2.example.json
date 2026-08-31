@@ -1,0 +1,23 @@
+{
+  "name": "public_sma_example",
+  "feature_column": "custom_score",
+  "lag": 0,
+  "signal_lag": 1,
+  "start_min_cross_section_size": 1,
+  "mode": "top_n",
+  "top_n": 1,
+  "ascending": false,
+  "scope": "filtered",
+  "exclude_warnings": true,
+  "min_age_days": 180,
+  "allowed_markets": [
+    "KRW-BTC"
+  ],
+  "value_filters": [
+    {
+      "feature_column": "custom_score",
+      "operator": "gt",
+      "value": 0.0
+    }
+  ]
+}

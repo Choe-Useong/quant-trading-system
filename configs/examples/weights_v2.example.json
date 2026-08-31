@@ -1,0 +1,7 @@
+{
+  "weighting": "fixed",
+  "fixed_weight": 1.0,
+  "gross_exposure": 1.0,
+  "rebalance_frequency": "every_bar",
+  "universe_name": "public_sma_example"
+}

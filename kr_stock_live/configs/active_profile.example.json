@@ -1,0 +1,5 @@
+{
+  "type": "kr_stock_live_active_profile_v1",
+  "profile_json": "kr_stock_live/configs/your_profile.json",
+  "updated_at": "YYYY-MM-DDT00:00:00"
+}

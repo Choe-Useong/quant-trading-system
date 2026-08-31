@@ -1,0 +1,9 @@
+pandas
+plotly
+vectorbt
+pyarrow
+hmmlearn
+nolds
+yfinance
+pykrx
+finance-datareader

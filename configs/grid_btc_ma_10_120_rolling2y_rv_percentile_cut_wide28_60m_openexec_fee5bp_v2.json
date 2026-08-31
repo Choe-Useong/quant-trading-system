@@ -1,0 +1,183 @@
+{
+  "candle_dir": "data/upbit_research/minutes/60",
+  "source_cache_dir": "data/upbit_research_cache/60",
+  "timeframe": "60m",
+  "out_dir": "data/grid/btc_ma_10_120_rolling2y_rv_percentile_cut_wide28_60m_openexec_fee5bp_v2",
+  "run_name_template": "btc_ma_10_120_roll2y_rvpctcut_rv{rv_window}_q{quantile_label}_openexec_fee5bp_v2",
+  "compute_rolling_ir": false,
+  "print_run_summaries": false,
+  "save_run_artifacts": true,
+  "feature_spec_template": [
+    {
+      "source": "trade_price",
+      "steps": [
+        {
+          "kind": "rolling_mean",
+          "params": {
+            "window": 10
+          }
+        }
+      ],
+      "column_name": "sma_10"
+    },
+    {
+      "source": "trade_price",
+      "steps": [
+        {
+          "kind": "rolling_mean",
+          "params": {
+            "window": 120
+          }
+        }
+      ],
+      "column_name": "sma_120"
+    },
+    {
+      "compare": {
+        "left_feature": "sma_10",
+        "operator": "gt",
+        "right_feature": "sma_120"
+      },
+      "column_name": "trend_on"
+    },
+    {
+      "source": "trade_price",
+      "steps": [
+        {
+          "kind": "log"
+        }
+      ],
+      "column_name": "log_price"
+    },
+    {
+      "source": "log_price",
+      "steps": [
+        {
+          "kind": "delta",
+          "params": {
+            "periods": 1
+          }
+        }
+      ],
+      "column_name": "log_return_1"
+    },
+    {
+      "source": "log_return_1",
+      "steps": [
+        {
+          "kind": "rolling_std",
+          "params": {
+            "window": "{rv_window}"
+          }
+        }
+      ],
+      "column_name": "current_rv_{rv_window}"
+    },
+    {
+      "source": "current_rv_{rv_window}",
+      "steps": [
+        {
+          "kind": "rolling_percentile",
+          "params": {
+            "window": 17520
+          }
+        }
+      ],
+      "column_name": "rv_pct_rv{rv_window}_roll2y"
+    },
+    {
+      "compare": {
+        "left_feature": "rv_pct_rv{rv_window}_roll2y",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "common_ready_2y"
+    },
+    {
+      "compare": {
+        "left_feature": "rv_pct_rv{rv_window}_roll2y",
+        "operator": "le",
+        "right_value": "{quantile}"
+      },
+      "column_name": "rv_percentile_allowed_rv{rv_window}_q{quantile_label}"
+    },
+    {
+      "logical": {
+        "operator": "and",
+        "features": [
+          "trend_on",
+          "common_ready_2y",
+          "rv_percentile_allowed_rv{rv_window}_q{quantile_label}"
+        ]
+      },
+      "column_name": "signal_rvpercentile_rv{rv_window}_q{quantile_label}"
+    }
+  ],
+  "universe_spec_template": {
+    "name": "{run_name}",
+    "feature_column": "signal_rvpercentile_rv{rv_window}_q{quantile_label}",
+    "lag": 0,
+    "signal_lag": 1,
+    "start_min_cross_section_size": 1,
+    "mode": "top_n",
+    "top_n": 1,
+    "ascending": false,
+    "scope": "filtered",
+    "exclude_warnings": true,
+    "allowed_markets": [
+      "KRW-BTC"
+    ],
+    "value_filters": [
+      {
+        "feature_column": "signal_rvpercentile_rv{rv_window}_q{quantile_label}",
+        "operator": "gt",
+        "value": 0.0
+      }
+    ]
+  },
+  "weight_spec_template": {
+    "weighting": "equal",
+    "gross_exposure": 1.0,
+    "rebalance_frequency": "every_bar",
+    "universe_name": "{run_name}"
+  },
+  "vectorbt_spec_template": {
+    "price_column": "opening_price",
+    "periods_per_year": 8760,
+    "fees": 0.0005,
+    "slippage": 0.0,
+    "benchmark_market": "KRW-BTC",
+    "benchmark_mode": "single_market",
+    "trim_start_mode": "timestamp",
+    "trim_start_timestamp": "2019-09-25 03:00:00"
+  },
+  "grid": {
+    "rv_window": [
+      120,
+      168,
+      240,
+      336
+    ],
+    "quantile": [
+      0.7,
+      0.75,
+      0.8,
+      0.85,
+      0.9,
+      0.95,
+      0.975
+    ],
+    "quantile_label": [
+      "070",
+      "075",
+      "080",
+      "085",
+      "090",
+      "095",
+      "0975"
+    ]
+  },
+  "constraints": [
+    "((quantile == 0.7 and quantile_label == '070') or (quantile == 0.75 and quantile_label == '075') or (quantile == 0.8 and quantile_label == '080') or (quantile == 0.85 and quantile_label == '085') or (quantile == 0.9 and quantile_label == '090') or (quantile == 0.95 and quantile_label == '095') or (quantile == 0.975 and quantile_label == '0975'))"
+  ]
+}

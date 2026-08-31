@@ -1,0 +1,324 @@
+{
+  "candle_dir": "data/stocks/daily",
+  "source_cache_dir": "data/stocks_cache/kr_stock_daily",
+  "out_dir": "data/grid/kr_stock_kospi_avgmcap100_rank12_skip3_top5_breadth200_kospi_trend_logic_compare_kospi_benchmark_v2",
+  "run_name_template": "kr_stock_kospi_avgmcap100_rank12_skip3_top5_{risk_on_feature}_monthly_kospi_benchmark_v2",
+  "compute_rolling_ir": false,
+  "print_run_summaries": false,
+  "save_run_artifacts": true,
+  "shared_feature_spec_template": [
+    {
+      "source": "trade_price",
+      "steps": [
+        {
+          "kind": "simple_return",
+          "params": {
+            "window": 1
+          }
+        },
+        {
+          "kind": "cross_rank",
+          "params": {
+            "descending": true
+          }
+        },
+        {
+          "kind": "calendar_mean",
+          "params": {
+            "freq": "M",
+            "signal_timing": "same_period"
+          }
+        },
+        {
+          "kind": "calendar_rolling_sum",
+          "params": {
+            "freq": "M",
+            "periods": 12,
+            "skip_periods": 3,
+            "signal_timing": "next_period"
+          }
+        }
+      ],
+      "column_name": "daily_rank_monthavg_12m_skip3m_sum"
+    },
+    {
+      "source": "market_cap",
+      "steps": [
+        {
+          "kind": "calendar_mean",
+          "params": {
+            "freq": "M",
+            "signal_timing": "next_period"
+          }
+        }
+      ],
+      "column_name": "market_cap_prev_month_avg"
+    },
+    {
+      "source": "market_code",
+      "steps": [],
+      "column_name": "market_code_raw"
+    },
+    {
+      "source": "price_available",
+      "steps": [],
+      "column_name": "price_available_raw"
+    },
+    {
+      "source": "marcap_available",
+      "steps": [],
+      "column_name": "marcap_available_raw"
+    },
+    {
+      "compare": {
+        "left_feature": "market_code_raw",
+        "operator": "eq",
+        "right_value": 1.0
+      },
+      "column_name": "is_kospi_raw"
+    },
+    {
+      "source": "is_kospi_raw",
+      "steps": [
+        {
+          "kind": "shift",
+          "params": {
+            "periods": 1
+          }
+        }
+      ],
+      "column_name": "is_kospi_lag1"
+    },
+    {
+      "compare": {
+        "left_feature": "price_available_raw",
+        "operator": "ge",
+        "right_value": 1.0
+      },
+      "column_name": "price_available_flag_raw"
+    },
+    {
+      "source": "price_available_flag_raw",
+      "steps": [
+        {
+          "kind": "shift",
+          "params": {
+            "periods": 1
+          }
+        }
+      ],
+      "column_name": "price_available_flag_lag1"
+    },
+    {
+      "compare": {
+        "left_feature": "marcap_available_raw",
+        "operator": "ge",
+        "right_value": 1.0
+      },
+      "column_name": "marcap_available_flag_raw"
+    },
+    {
+      "source": "marcap_available_flag_raw",
+      "steps": [
+        {
+          "kind": "shift",
+          "params": {
+            "periods": 1
+          }
+        }
+      ],
+      "column_name": "marcap_available_flag_lag1"
+    },
+    {
+      "logical": {
+        "operator": "and",
+        "features": [
+          "is_kospi_lag1",
+          "price_available_flag_lag1",
+          "marcap_available_flag_lag1"
+        ]
+      },
+      "column_name": "kr_stock_base_mask_lag1"
+    },
+    {
+      "source": "market_cap_prev_month_avg",
+      "steps": [
+        {
+          "kind": "mask_by_feature",
+          "params": {
+            "feature": "kr_stock_base_mask_lag1"
+          }
+        }
+      ],
+      "column_name": "market_cap_prev_month_avg_in_base"
+    },
+    {
+      "source": "trade_price",
+      "steps": [
+        {
+          "kind": "period_simple_return",
+          "params": {
+            "freq": "M",
+            "periods": 3,
+            "signal_timing": "next_period"
+          }
+        }
+      ],
+      "column_name": "return_3m"
+    },
+    {
+      "compare": {
+        "left_feature": "return_3m",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "return_3m_pos"
+    },
+    {
+      "breadth": {
+        "driver_feature": "market_cap_prev_month_avg_in_base",
+        "signal_feature": "return_3m_pos",
+        "mode": "top_n",
+        "top_n": 200,
+        "ascending": false
+      },
+      "column_name": "mcap200_pos3m_ratio"
+    },
+    {
+      "source": "market:KOSPI:index_price",
+      "steps": [],
+      "column_name": "kospi_index_price"
+    },
+    {
+      "source": "market:KOSPI:index_price",
+      "steps": [
+        {
+          "kind": "simple_return",
+          "params": {
+            "window": 252
+          }
+        }
+      ],
+      "column_name": "kospi_absmom_252d"
+    },
+    {
+      "compare": {
+        "left_feature": "kospi_index_price",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "risk_on_plain"
+    },
+    {
+      "compare": {
+        "left_feature": "mcap200_pos3m_ratio",
+        "operator": "gt",
+        "right_value": 0.5
+      },
+      "column_name": "risk_on_breadth200_pos3m_gt0p5"
+    },
+    {
+      "compare": {
+        "left_feature": "kospi_absmom_252d",
+        "operator": "gt",
+        "right_value": -0.05
+      },
+      "column_name": "risk_on_kospi_absmom252_gt_m05"
+    },
+    {
+      "logical": {
+        "operator": "or",
+        "features": [
+          "risk_on_breadth200_pos3m_gt0p5",
+          "risk_on_kospi_absmom252_gt_m05"
+        ]
+      },
+      "column_name": "risk_on_breadth_or_kospi_trend"
+    },
+    {
+      "logical": {
+        "operator": "and",
+        "features": [
+          "risk_on_breadth200_pos3m_gt0p5",
+          "risk_on_kospi_absmom252_gt_m05"
+        ]
+      },
+      "column_name": "risk_on_breadth_and_kospi_trend"
+    }
+  ],
+  "universe_spec_template": {
+    "name": "{run_name}",
+    "feature_column": "daily_rank_monthavg_12m_skip3m_sum",
+    "lag": 0,
+    "signal_lag": 0,
+    "mode": "top_n",
+    "top_n": 5,
+    "ascending": true,
+    "start_min_cross_section_size": 100,
+    "value_filters": [
+      {
+        "feature_column": "market_code_raw",
+        "operator": "eq",
+        "value": 1.0,
+        "lag": 1
+      },
+      {
+        "feature_column": "price_available_raw",
+        "operator": "ge",
+        "value": 1.0,
+        "lag": 1
+      },
+      {
+        "feature_column": "marcap_available_raw",
+        "operator": "ge",
+        "value": 1.0,
+        "lag": 1
+      }
+    ],
+    "filter_stages": [
+      {
+        "mode": "sequential",
+        "filters": [
+          {
+            "feature_column": "market_cap_prev_month_avg",
+            "mode": "top_n",
+            "top_n": 100,
+            "ascending": false,
+            "scope": "filtered",
+            "lag": 0
+          }
+        ]
+      }
+    ]
+  },
+  "weight_spec_template": {
+    "weighting": "equal",
+    "gross_exposure": 1.0,
+    "gross_exposure_feature": "{risk_on_feature}",
+    "gross_exposure_lag": 0,
+    "gross_exposure_clip_min": 0.0,
+    "gross_exposure_clip_max": 1.0,
+    "rebalance_frequency": "monthly",
+    "universe_name": "{run_name}"
+  },
+  "vectorbt_spec_template": {
+    "price_column": "trade_price",
+    "benchmark_price_column": "index_price",
+    "fees": 0.0015,
+    "slippage": 0.001,
+    "prune_inactive_price_columns": true,
+    "benchmark_market": "KOSPI",
+    "benchmark_mode": "single_market",
+    "trim_start_mode": "timestamp",
+    "trim_start_timestamp": "2015-01-02 00:00:00"
+  },
+  "grid": {
+    "risk_on_feature": [
+      "risk_on_plain",
+      "risk_on_breadth200_pos3m_gt0p5",
+      "risk_on_kospi_absmom252_gt_m05",
+      "risk_on_breadth_or_kospi_trend",
+      "risk_on_breadth_and_kospi_trend"
+    ]
+  }
+}

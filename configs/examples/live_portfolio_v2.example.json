@@ -1,0 +1,17 @@
+{
+  "strategy_type": "portfolio_pipeline_v2",
+  "portfolio_name": "public_sma_example",
+  "candle_dir": "data/example/upbit/minutes/240",
+  "source_cache_dir": "data/example/upbit_cache/240",
+  "candle_unit": 240,
+  "features_spec_json": "configs/examples/features_v2.example.json",
+  "market_scores_spec_json": "configs/examples/market_scores_v2.example.json",
+  "universe_spec_json": "configs/examples/universe_v2.example.json",
+  "weights_spec_json": "configs/examples/weights_v2.example.json",
+  "refresh_candles": 20,
+  "min_order_krw": 5000,
+  "only_markets": [],
+  "exclude_markets": [],
+  "market_caps": {},
+  "cap_overflow_mode": "keep_cash"
+}
