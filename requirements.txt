@@ -1,9 +1,15 @@
+numpy
 pandas
+scipy
+scikit-learn
 plotly
 vectorbt
 pyarrow
 hmmlearn
 nolds
+arch
+lightgbm
+requests
 yfinance
 pykrx
 finance-datareader
