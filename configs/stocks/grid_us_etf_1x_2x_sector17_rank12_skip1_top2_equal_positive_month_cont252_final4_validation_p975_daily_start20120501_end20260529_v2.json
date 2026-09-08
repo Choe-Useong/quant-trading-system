@@ -1,0 +1,243 @@
+{
+  "candle_dir": "data/stocks/daily",
+  "source_cache_dir": "data/stocks_cache/global_etf_1x_2x_sector17_daily_end20260529",
+  "out_dir": "data/grid/stock_us_etf_1x_2x_sector17_rank12_skip1_top2_equal_positive_month_cont252_final4_validation_p975_daily_start20120501_end20260529_signalprice_v2_fee5bp",
+  "run_name_template": "us_etf_1x_2x_sector17_m12skip1_top2_equal_posmonthcont252final4_{candidate_label}_vol10d_pct252d_lep975_changeonly_start20120501_end20260529_fee5bp_v2",
+  "compute_rolling_ir": false,
+  "print_run_summaries": false,
+  "save_run_artifacts": true,
+  "shared_feature_spec_template": [
+    {
+      "source": "signal_price",
+      "steps": [{ "kind": "simple_return", "params": { "window": 126 } }],
+      "column_name": "absmom_126d"
+    },
+    {
+      "source": "signal_price",
+      "steps": [
+        { "kind": "simple_return", "params": { "window": 1 } },
+        { "kind": "rolling_std", "params": { "window": 10 } }
+      ],
+      "column_name": "realized_vol_10d"
+    },
+    {
+      "source": "realized_vol_10d",
+      "steps": [{ "kind": "rolling_percentile", "params": { "window": 252 } }],
+      "column_name": "realized_vol_10d_pct252d"
+    },
+    {
+      "source": "signal_price",
+      "steps": [{ "kind": "simple_return", "params": { "window": 1 } }],
+      "column_name": "daily_return"
+    },
+    {
+      "compare": {
+        "left_feature": "daily_return",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "positive_day_flag"
+    },
+    {
+      "source": "signal_price",
+      "steps": [
+        {
+          "kind": "period_simple_return",
+          "params": { "freq": "M", "periods": 1, "signal_timing": "next_period" }
+        }
+      ],
+      "column_name": "completed_month_return"
+    },
+    {
+      "compare": {
+        "left_feature": "completed_month_return",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "completed_month_positive_flag"
+    },
+    {
+      "compare": {
+        "left_feature": "signal_price",
+        "operator": "gt",
+        "right_value": 0.0
+      },
+      "column_name": "always_eligible"
+    }
+  ],
+  "feature_spec_template": [
+    {
+      "source": "completed_month_positive_flag",
+      "steps": [
+        {
+          "kind": "calendar_rolling_sum",
+          "params": {
+            "freq": "M",
+            "periods": "{positive_window}",
+            "skip_periods": 0,
+            "signal_timing": "same_period"
+          }
+        }
+      ],
+      "column_name": "positive_month_count"
+    },
+    {
+      "compare": {
+        "left_feature": "positive_month_count",
+        "operator": "ge",
+        "right_value": "{positive_threshold}"
+      },
+      "column_name": "positive_month_qualified"
+    },
+    {
+      "source": "positive_day_flag",
+      "steps": [
+        { "kind": "rolling_mean", "params": { "window": 252 } },
+        {
+          "kind": "calendar_mean",
+          "params": { "freq": "M", "signal_timing": "next_period" }
+        },
+        { "kind": "cross_percentile", "params": { "descending": true } }
+      ],
+      "column_name": "continuity_252d_cross_pct_monthly"
+    },
+    {
+      "compare": {
+        "left_feature": "continuity_252d_cross_pct_monthly",
+        "operator": "le",
+        "right_value": 0.9
+      },
+      "column_name": "continuity_252d_keep90"
+    },
+    {
+      "source": "signal_price",
+      "steps": [
+        { "kind": "simple_return", "params": { "window": 1 } },
+        { "kind": "cross_rank", "params": { "descending": true } },
+        {
+          "kind": "calendar_mean",
+          "params": { "freq": "M", "signal_timing": "same_period" }
+        },
+        {
+          "kind": "calendar_rolling_sum",
+          "params": {
+            "freq": "M",
+            "periods": 12,
+            "skip_periods": 1,
+            "signal_timing": "next_period"
+          }
+        }
+      ],
+      "column_name": "daily_rank_monthavg_12m_skip1m_sum"
+    }
+  ],
+  "universe_spec_template": {
+    "name": "{run_name}",
+    "feature_column": "daily_rank_monthavg_12m_skip1m_sum",
+    "lag": 0,
+    "signal_lag": 0,
+    "mode": "top_n",
+    "top_n": 2,
+    "ascending": true,
+    "allowed_markets": [
+      "IYW-KRW", "IYE-KRW", "IYF-KRW", "IYR-KRW", "IYH-KRW", "IYM-KRW",
+      "GLD-KRW", "TLT-KRW", "EEM-KRW", "EWJ-KRW", "IYC-KRW", "IYK-KRW",
+      "IDU-KRW", "IYJ-KRW", "IBB-KRW", "IYZ-KRW", "IWM-KRW", "ROM-KRW",
+      "ERX-KRW", "UYG-KRW", "URE-KRW", "RXL-KRW", "UYM-KRW", "UGL-KRW",
+      "EET-KRW", "EZJ-KRW", "UCC-KRW", "UGE-KRW", "UPW-KRW", "UXI-KRW",
+      "BIB-KRW", "LTL-KRW", "UWM-KRW"
+    ],
+    "value_filters": [
+      { "feature_column": "absmom_126d", "operator": "gt", "value": 0.0, "lag": 1 },
+      {
+        "feature_column": "realized_vol_10d_pct252d",
+        "operator": "le",
+        "value": 0.975,
+        "lag": 1
+      },
+      {
+        "feature_column": "{positive_month_feature}",
+        "operator": "eq",
+        "value": 1.0,
+        "lag": 0
+      },
+      {
+        "feature_column": "{continuity_feature}",
+        "operator": "eq",
+        "value": 1.0,
+        "lag": 0
+      }
+    ]
+  },
+  "weight_spec_template": {
+    "weighting": "rank_fixed",
+    "rank_weight_feature": "daily_rank_monthavg_12m_skip1m_sum",
+    "rank_weight_lag": 0,
+    "rank_weight_ascending": true,
+    "rank_weights": [0.5, 0.5],
+    "gross_exposure": 1.0,
+    "rebalance_frequency": "change_only",
+    "universe_name": "{run_name}"
+  },
+  "vectorbt_spec_template": {
+    "price_column": "trade_price",
+    "fees": 0.0005,
+    "slippage": 0.0,
+    "benchmark_market": "PORTFOLIO_GROUP_REBALANCE",
+    "benchmark_mode": "portfolio_group_rebalance",
+    "benchmark_fixed_weights": {
+      "IYW-KRW": 0.030303030303030304,
+      "IYE-KRW": 0.030303030303030304,
+      "IYF-KRW": 0.030303030303030304,
+      "IYR-KRW": 0.030303030303030304,
+      "IYH-KRW": 0.030303030303030304,
+      "IYM-KRW": 0.030303030303030304,
+      "GLD-KRW": 0.030303030303030304,
+      "TLT-KRW": 0.030303030303030304,
+      "EEM-KRW": 0.030303030303030304,
+      "EWJ-KRW": 0.030303030303030304,
+      "IYC-KRW": 0.030303030303030304,
+      "IYK-KRW": 0.030303030303030304,
+      "IDU-KRW": 0.030303030303030304,
+      "IYJ-KRW": 0.030303030303030304,
+      "IBB-KRW": 0.030303030303030304,
+      "IYZ-KRW": 0.030303030303030304,
+      "IWM-KRW": 0.030303030303030304,
+      "ROM-KRW": 0.030303030303030304,
+      "ERX-KRW": 0.030303030303030304,
+      "UYG-KRW": 0.030303030303030304,
+      "URE-KRW": 0.030303030303030304,
+      "RXL-KRW": 0.030303030303030304,
+      "UYM-KRW": 0.030303030303030304,
+      "UGL-KRW": 0.030303030303030304,
+      "EET-KRW": 0.030303030303030304,
+      "EZJ-KRW": 0.030303030303030304,
+      "UCC-KRW": 0.030303030303030304,
+      "UGE-KRW": 0.030303030303030304,
+      "UPW-KRW": 0.030303030303030304,
+      "UXI-KRW": 0.030303030303030304,
+      "BIB-KRW": 0.030303030303030304,
+      "LTL-KRW": 0.030303030303030304,
+      "UWM-KRW": 0.030303030303030304
+    },
+    "benchmark_rebalance_frequency": "monthly",
+    "benchmark_listed_normalize": true,
+    "trim_start_mode": "timestamp",
+    "trim_start_timestamp": "2012-05-01 00:00:00"
+  },
+  "grid": {
+    "candidate_label": [
+      "baseline",
+      "pos12ge6_cont252keep90",
+      "pos20ge11_cont252keep90",
+      "pos24ge12_cont252keep90"
+    ],
+    "positive_month_feature": ["always_eligible", "positive_month_qualified"],
+    "positive_window": [1, 12, 20, 24],
+    "positive_threshold": [0, 6, 11, 12],
+    "continuity_feature": ["always_eligible", "continuity_252d_keep90"]
+  },
+  "constraints": [
+    "(candidate_label == 'baseline' and positive_month_feature == 'always_eligible' and positive_window == 1 and positive_threshold == 0 and continuity_feature == 'always_eligible') or (candidate_label == 'pos12ge6_cont252keep90' and positive_month_feature == 'positive_month_qualified' and positive_window == 12 and positive_threshold == 6 and continuity_feature == 'continuity_252d_keep90') or (candidate_label == 'pos20ge11_cont252keep90' and positive_month_feature == 'positive_month_qualified' and positive_window == 20 and positive_threshold == 11 and continuity_feature == 'continuity_252d_keep90') or (candidate_label == 'pos24ge12_cont252keep90' and positive_month_feature == 'positive_month_qualified' and positive_window == 24 and positive_threshold == 12 and continuity_feature == 'continuity_252d_keep90')"
+  ]
+}
