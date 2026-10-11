@@ -811,3 +811,32 @@ list를 grid 값으로 넣으면 결과 요약의 groupby나 plateau 계산에�
 - `rank_weights`는 `w1`, `w2`, `w3`처럼 나눠서 넣고 `constraints`로 묶는다.
 - 일별 필터를 월별 전략에 붙이면 거래가 과도하게 늘 수 있다. 월별 전략에는 `calendar_mean(freq="M", signal_timing="next_period")` 같은 고정화가 필요한지 먼저 검토한다.
 - 최종 후보는 `summary_results.csv`뿐 아니라 실제 `weights.csv`나 artifacts로 선택 종목과 거래 빈도를 확인한다.
+
+## Public release manifest v2
+
+`configs/public_release_v2.json`은 비공개 저장소에서 공개 저장소로 동기화할 파일을 명시적으로 제한한다. 새 파일은 자동 공개되지 않으며, 공개하려면 `include`에 경로를 추가하고 검토해야 한다.
+
+| 필드 | 역할 |
+|---|---|
+| `schema_version` | manifest 형식 버전. 현재 값은 `2`다. |
+| `include` | 비공개 저장소를 원본으로 관리할 공개 파일의 명시적 allowlist다. |
+| `preserve` | 공개 저장소에서만 관리하며 동기화나 prune으로 건드리지 않을 README와 예제 파일이다. |
+| `deny` | 데이터, 캐시, 실계좌 설정, 로그, 상태 및 credential 계열 경로를 차단한다. |
+| `ignore` | `__pycache__`처럼 Git에 공개되지 않는 로컬 생성물은 드리프트 계산에서 제외한다. |
+| `forbidden_content_patterns` | 선택된 파일에서 private key나 알려진 token 형식을 탐지한다. |
+
+먼저 쓰기 없는 검사를 수행한다.
+
+```powershell
+py scripts/export_public_release_v2.py --check --public-dir "C:\path\to\quant-trading-system-public"
+```
+
+검토가 끝난 뒤에만 동기화한다. 원본과 공개 저장소 Git 작업트리가 모두 깨끗해야 하며, 미관리 파일이 있으면 기본적으로 중단한다.
+
+```powershell
+py scripts/export_public_release_v2.py --sync --public-dir "C:\path\to\quant-trading-system-public"
+```
+
+미관리 파일을 검토하고 삭제하기로 결정한 경우에만 `--prune`을 추가한다. `--check` 종료 코드는 동기화 상태면 `0`, 안전하지만 차이가 있으면 `1`, manifest 오류나 민감정보 차단이면 `2`다.
+
+기본적으로 원본 작업트리가 dirty면 동기화를 거부한다. 긴급하게 검토 완료된 작업트리 내용을 공개해야 할 때만 `--allow-dirty-source`를 명시하며, 이 경우에도 공개 저장소 작업트리는 반드시 clean이어야 한다.

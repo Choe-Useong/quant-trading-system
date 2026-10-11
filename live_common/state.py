@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -14,16 +16,37 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"version": 1, "events": {}, "plans": {}}
-    try:
-        state = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {"version": 1, "events": {}, "plans": {}}
+    state = read_json(path)
+    if not isinstance(state, dict):
+        raise ValueError(f"State file must contain a JSON object: {path}")
     if not isinstance(state.get("events"), dict):
         state["events"] = {}
     if not isinstance(state.get("plans"), dict):

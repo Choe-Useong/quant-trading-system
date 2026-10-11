@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="After submitting buys, wait for fills and auto-finalize in the same run when fully filled.",
     )
     parser.add_argument("--fill-wait-seconds", type=float, default=20.0)
-    parser.add_argument("--fill-retry-count", type=int, default=2)
+    parser.add_argument("--fill-retry-count", type=int, default=5)
     return parser
 
 
@@ -88,10 +88,10 @@ def _auto_state_path(run_dir: Path) -> Path:
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    try:
-        return read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    payload = read_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Auto state file must contain a JSON object: {path}")
+    return payload
 
 
 def _write_auto_state(path: Path, payload: dict[str, Any]) -> None:
@@ -445,7 +445,10 @@ def _handle_pending_with_retries(
             return result
         if str(auto_state.get("reason") or "") != f"{phase}_orders_not_confirmed_filled":
             return result
-    return "stop"
+    raise RuntimeError(
+        f"{phase} orders were not confirmed fully filled after {attempts} attempts; "
+        "pending order state was preserved"
+    )
 
 
 def _maybe_continue_buy_after_submission(
