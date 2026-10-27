@@ -225,6 +225,32 @@ def _available_any_timestamps(price_frame: pd.DataFrame) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(price_frame.index[mask])
 
 
+def _trim_validation_timestamps(
+    timestamps: pd.DatetimeIndex,
+    vectorbt_payloads: list[dict[str, Any]],
+) -> pd.DatetimeIndex:
+    """Apply configured timestamp starts before dividing a family into periods.
+
+    Features retain their full warmup history. If candidates specify different
+    starts, use the latest one so every candidate shares the evaluation period.
+    Other trim modes retain their existing per-backtest behavior.
+    """
+    configured_starts: list[pd.Timestamp] = []
+    for payload in vectorbt_payloads:
+        if str(payload.get("trim_start_mode", "none")) != "timestamp":
+            continue
+        value = payload.get("trim_start_timestamp")
+        if value is None:
+            raise ValueError("trim_start_mode='timestamp' requires vectorbt_spec.trim_start_timestamp")
+        start = pd.Timestamp(str(value))
+        if pd.isna(start):
+            raise ValueError("trim_start_timestamp must be a valid timestamp")
+        configured_starts.append(start)
+    if not configured_starts:
+        return timestamps
+    return timestamps[timestamps >= max(configured_starts)]
+
+
 def _build_folds(
     timestamps: pd.DatetimeIndex,
     is_months: int,
@@ -715,6 +741,12 @@ def main() -> None:
         if max_markets is not None:
             timestamp_price_frame = timestamp_price_frame.reindex(columns=sorted(timestamp_price_frame.columns)[:max_markets])
         timestamps = _available_any_timestamps(timestamp_price_frame)
+    vectorbt_payloads = []
+    for combo in combinations:
+        context = dict(combo)
+        context["run_name"] = run_name_template.format(**context)
+        vectorbt_payloads.append(_render_value(config.get("vectorbt_spec_template", {}), context))
+    timestamps = _trim_validation_timestamps(timestamps, vectorbt_payloads)
     folds = _build_folds(
         timestamps,
         is_months=args.is_months,

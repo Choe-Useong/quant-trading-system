@@ -544,6 +544,46 @@ Weight는 선택된 후보를 실제 목표 비중으로 바꾼다.
 | `trim_start_mode` | 시작점 자르기 방식 |
 | `trim_start_timestamp` | 고정 시작일 |
 
+`trim_start_mode="timestamp"`이면 PBO와 워크포워드도 `trim_start_timestamp`
+이후의 가격 시점부터 평가 구간을 나눈다. 후보마다 날짜가 다르면 가장 늦은
+날짜를 공통 시작점으로 사용한다. 지표 계산에 필요한 이전 데이터는 유지한다.
+워크포워드의 `--is-months`는 이 시작점부터 세므로, 준비 기간을 더해 지정하지
+않는다. 예를 들어 준비 기간 2년을 포함해 `48`개월로 실행하던 실험에서 실제
+평가 기간이 2년이었다면, 같은 OOS 시작점을 유지하려면 `24`개월을 지정한다.
+`none`과 `first_weight`의 기존 동작은 유지하며, `first_weight`로 PBO/WF의
+공통 시작점을 자동 추정하는 기능을 추가한 것은 아니다.
+
+PBO 실행기 `scripts/research/analyze_pbo.py`는 후보마다 전체 평가 기간을 한 번
+백테스트하고 공통 날짜의 수익률을 사용한다. IS/OOS에 선택된 구간의 수익률을
+시간순으로 이어 붙여 지표를 다시 계산하며, 구간별 지표의 평균으로 순위를
+정하지 않는다. `air`는 전략과 벤치마크의 수익률 차이, 나머지 지표는 전략
+수익률을 입력으로 사용한다. 연결된 수익률로 CAGR/낙폭을 계산할 때는 단위
+초기 자산을 앞에 두므로 관측치 한 개가 복리 계산 한 구간에 대응한다.
+후보별 연율화는 백테스트의 `periods_per_year`를 따른다.
+
+모든 절반 조합과 IS/OOS를 뒤집은 조합을 포함한다. OOS 순위는 오름차순
+평균 순위를 `후보 수 + 1`로 나누며, PBO는 `lambda <= 0`, 즉 중앙 순위
+이하인 비율이다. 동점 IS 최고 후보는 이름 정렬상 첫 후보로 정한다.
+점수를 계산할 수 없는 후보가 있는 조합은 후보를 빼고 진행하지 않고 오류로
+알린다. `--max-splits 0`은 전체 조합이며, 제한할 때는 양방향 쌍을 유지하도록
+짝수를 지정한다. 여러 anchor를 지정하면 전체 조합을 합쳐 PBO를 집계하며,
+anchor별 PBO도 별도로 저장한다. IS/OOS 구분은 워크포워드 시간 순서가 아니다.
+
+기존 `--subperiod-months`와 `--anchor-month-offsets`는 유지한다. 이 분할은
+달력 기준이므로 블록별 관측치 수가 같다는 보장은 없다. `pypbo`의 동일 관측치
+수 분할과 비교할 때는 입력 수익률뿐 아니라 블록 경계도 맞춰야 한다.
+불완전한 마지막 구간과, 구간 수가 홀수이면 마지막 완전 구간도 제외하는 기존
+규칙은 유지한다. 요약 JSON의 `coverage_by_anchor`에 실제 사용 시작/끝,
+블록별 관측치 수, 제외한 앞/뒤 관측치 수를 기록하며 실행 종료 시에도 출력한다.
+공통 날짜 정렬로 제외된 관측치 수도 요약에 기록한다.
+
+결과 파일명과 실행 옵션은 유지한다. `pbo_period_score_matrix.parquet`와
+`pbo_period_scores_long.csv`는 구간별 진단용이며 PBO 계산의 직접 입력이 아니다.
+long CSV는 선택한 지표와 관측치 수를 기록하며 이전의 개별 구간 백테스트
+통계 열은 제공하지 않는다. 요약 JSON의 `method_version: 2`가 새 계산을 식별한다.
+기존 계산 결과는 자동 변경되지 않으므로 새 방식의 PBO가 필요하면 다시 실행한다.
+SPA와 워크포워드의 계산 방법은 이 PBO 변경으로 바뀌지 않는다.
+
 벤치마크 상대지표는 전략과 벤치마크에 실제 값이 모두 존재하는 공통 관측기간에서 계산합니다. 전략의 전체기간 CAGR, MDD 등 절대지표는 전략 자체의 전체기간을 유지하며, 요약에는 `Benchmark Comparison Start`, `Benchmark Comparison End`, `Benchmark Comparison Observations`가 기록됩니다.
 
 전략 유니버스에 없는 지수나 ETF를 벤치마크로 사용할 때는 벤치마크 캐시를 별도로 지정한다.
@@ -820,7 +860,7 @@ list를 grid 값으로 넣으면 결과 요약의 groupby나 plateau 계산에�
 |---|---|
 | `schema_version` | manifest 형식 버전. 현재 값은 `2`다. |
 | `include` | 비공개 저장소를 원본으로 관리할 공개 파일의 명시적 allowlist다. |
-| `preserve` | 공개 저장소에서만 관리하며 동기화나 prune으로 건드리지 않을 README와 예제 파일이다. 대표 전략 보고서 `notes/strategy_examples.md`는 비공개 저장소의 `include` 원본에서 동기화한다. |
+| `preserve` | 공개 저장소에서만 관리하며 동기화나 prune으로 건드리지 않을 README와 예제 파일이다. 백테스트 사례 보고서 `notes/strategy_examples.md`는 비공개 저장소의 `include` 원본에서 동기화한다. |
 | `deny` | 데이터, 캐시, 실계좌 설정, 로그, 상태 및 credential 계열 경로를 차단한다. |
 | `ignore` | `__pycache__`처럼 Git에 공개되지 않는 로컬 생성물은 드리프트 계산에서 제외한다. |
 | `forbidden_content_patterns` | 선택된 파일에서 private key나 알려진 token 형식을 탐지한다. |
