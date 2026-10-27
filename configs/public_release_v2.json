@@ -8,6 +8,7 @@
     "configs/presets/features_v2_presets.json",
     "configs/stocks/grid_kr_etf_cat24_rank9_top_weight_breadth_validation_v2.json",
     "configs/stocks/grid_kr_stock_kospi_avgmcap100_rank12_skip3_top5_breadth200_kospi_trend_logic_compare_kospi_benchmark_v2.json",
+    "configs/stocks/grid_kr_stock_rank_months_breadth_threshold_joint_v2.json",
     "configs/stocks/grid_us_etf_1x_2x_sector17_rank12_skip1_top2_equal_positive_month_cont252_final4_validation_p975_daily_start20120501_end20260529_v2.json",
     "kr_stock_live/__init__.py",
     "kr_stock_live/active_profile.py",
