@@ -820,7 +820,7 @@ list를 grid 값으로 넣으면 결과 요약의 groupby나 plateau 계산에�
 |---|---|
 | `schema_version` | manifest 형식 버전. 현재 값은 `2`다. |
 | `include` | 비공개 저장소를 원본으로 관리할 공개 파일의 명시적 allowlist다. |
-| `preserve` | 공개 저장소에서만 관리하며 동기화나 prune으로 건드리지 않을 README와 예제 파일이다. |
+| `preserve` | 공개 저장소에서만 관리하며 동기화나 prune으로 건드리지 않을 README와 예제 파일이다. 대표 전략 보고서 `notes/strategy_examples.md`는 비공개 저장소의 `include` 원본에서 동기화한다. |
 | `deny` | 데이터, 캐시, 실계좌 설정, 로그, 상태 및 credential 계열 경로를 차단한다. |
 | `ignore` | `__pycache__`처럼 Git에 공개되지 않는 로컬 생성물은 드리프트 계산에서 제외한다. |
 | `forbidden_content_patterns` | 선택된 파일에서 private key나 알려진 token 형식을 탐지한다. |

@@ -3,6 +3,7 @@
   "include": [
     "requirements.txt",
     "configs/public_release_v2.json",
+    "notes/strategy_examples.md",
     "configs/grid_btc_ma_10_120_rolling2y_rv_percentile_cut_wide28_60m_openexec_fee5bp_v2.json",
     "configs/presets/features_v2_presets.json",
     "configs/stocks/grid_kr_etf_cat24_rank9_top_weight_breadth_validation_v2.json",
@@ -157,7 +158,6 @@
     "live/performance/snapshot_account.py",
     "live/run_live_job_v2.cmd",
     "live/run_live_job_v2.py",
-    "notes/strategy_examples.md",
     "kr_stock_live/configs/active_profile.example.json",
     "us_stock_live/configs/active_profile.example.json"
   ],
