@@ -70,7 +70,6 @@
     "live_common/target_weights.py",
     "notes/config_reference_v2.md",
     "notes/feature_inventory.md",
-    "notes/llm_assisted_workflow.md",
     "scripts/analyze_drawdown.py",
     "scripts/build_features_v2.py",
     "scripts/build_fx_adjusted_stock_universe.py",
