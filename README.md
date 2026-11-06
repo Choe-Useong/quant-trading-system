@@ -24,7 +24,7 @@
 <p><strong>CAGR 30.94%</strong><br><strong>최대낙폭 -28.17%</strong></p>
 <p><sub>비교: KOSPI<br>CAGR 13.25% · 최대낙폭 -43.90%</sub></p>
 <a href="notes/strategy_examples.md#3-국내-주식-사례"><img src="notes/assets/kr_stock_case.png" alt="국내 주식 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#3-국내-주식-사례"><strong>국내 주식 사례 자세히 보기 →</strong></a></p>
+<p><a href="notes/strategy_examples.md#3-국내-주식-사례"><strong>사례 자세히 보기 →</strong></a></p>
 </td>
 <td width="50%" valign="top">
 <h3>02. 미국 ETF</h3>
@@ -32,9 +32,14 @@
 <p><strong>CAGR 36.16%</strong><br><strong>최대낙폭 -32.15%</strong></p>
 <p><sub>비교: 원화 환산 SPY<br>CAGR 17.08% · 최대낙폭 -29.62%</sub></p>
 <a href="notes/strategy_examples.md#4-미국-etf-사례"><img src="notes/assets/us_etf_case.png" alt="미국 ETF 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#4-미국-etf-사례"><strong>미국 ETF 사례 자세히 보기 →</strong></a></p>
+<p><a href="notes/strategy_examples.md#4-미국-etf-사례"><strong>사례 자세히 보기 →</strong></a></p>
 </td>
 </tr>
+</table>
+
+<br>
+
+<table>
 <tr>
 <td width="50%" valign="top">
 <h3>03. BTC 현물</h3>
@@ -42,20 +47,20 @@
 <p><strong>CAGR 80.03%</strong><br><strong>최대낙폭 -35.78%</strong></p>
 <p><sub>비교: BTC 보유<br>CAGR 38.90% · 최대낙폭 -74.85%</sub></p>
 <a href="notes/strategy_examples.md#5-btc-사례"><img src="notes/assets/btc_spot_case.png" alt="BTC 현물 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#5-btc-사례"><strong>BTC 현물 사례 자세히 보기 →</strong></a></p>
+<p><a href="notes/strategy_examples.md#5-btc-사례"><strong>사례 자세히 보기 →</strong></a></p>
 </td>
 <td width="50%" valign="top">
-<h3>04. BTC 제외 USDT 무기한 선물</h3>
-<p><strong>거래대금·주간 수익률 그룹 롱숏</strong><br><sub>2020-01-01 ~ 2026-10-27</sub></p>
-<p><strong>CAGR 40.88%</strong><br><strong>최대낙폭 -35.05%</strong><br><sub>전체 기간 누적수익률 1위 조합</sub></p>
+<h3>04. 코인 선물</h3>
+<p><strong>거래대금·수익률 그룹 롱숏</strong><br><sub>2020-01-01 ~ 2026-10-27</sub></p>
+<p><strong>CAGR 40.88%</strong><br><strong>최대낙폭 -35.05%</strong></p>
 <p><sub>비교: BTC 가격 보유<br>CAGR 42.55% · 최대낙폭 -77.24%</sub></p>
 <a href="notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교"><img src="notes/assets/alt_futures_case_preview.png" alt="BTC 제외 USDT 무기한 선물 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교"><strong>BTC 제외 USDT 무기한 선물 사례 자세히 보기 →</strong></a></p>
+<p><a href="notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교"><strong>사례 자세히 보기 →</strong></a></p>
 </td>
 </tr>
 </table>
 
-선물 그래프는 전체 기간 성과로 선정한 1·2위 조합을 함께 표시합니다. 비교 기준과 비용 조건은 각 사례 보고서에 적었습니다.
+선물 사례는 BTC를 제외한 USDT 무기한 선물입니다. 수치는 전체 기간 누적수익률 1위 조합이며, 그래프는 1·2위를 함께 표시합니다. 비교 기준과 비용 조건은 각 사례 보고서에 적었습니다.
 
 ## 시스템 구성
 
