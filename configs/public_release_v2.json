@@ -153,7 +153,11 @@
     "us_stock_live/trading/state.py",
     "notes/assets/system_architecture.png",
     "notes/assets/alt_ls9_72_top5_index.png",
-    "notes/assets/alt_ls9_72_cagr_heatmap.png"
+    "notes/assets/alt_ls9_72_cagr_heatmap.png",
+    "notes/assets/kr_stock_case.png",
+    "notes/assets/us_etf_case.png",
+    "notes/assets/btc_spot_case.png",
+    "notes/assets/alt_futures_case_preview.png"
   ],
   "preserve": [
     ".gitignore",

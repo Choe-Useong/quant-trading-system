@@ -12,6 +12,19 @@
 
 ![퀀트 트레이딩 시스템 아키텍처](notes/assets/system_architecture.png)
 
+## 백테스트 사례 미리보기
+
+| 국내 주식 · 순위 모멘텀·시장 확산도 | 미국 ETF · 상승월·추세 지속성 |
+| --- | --- |
+| [![국내 주식 성과 그래프](notes/assets/kr_stock_case.png)](notes/strategy_examples.md#3-국내-주식-사례) | [![미국 ETF 성과 그래프](notes/assets/us_etf_case.png)](notes/strategy_examples.md#4-미국-etf-사례) |
+| **CAGR 30.94% · 최대낙폭 -28.17%**<br>2016-01-04 ~ 2026-09-21 | **CAGR 36.16% · 최대낙폭 -32.15%**<br>2012-05-01 ~ 2026-05-29 |
+| **BTC 현물 · 이동평균·변동성 필터** | **BTC 제외 USDT 무기한 선물 · 그룹별 롱숏** |
+| [![BTC 현물 성과 그래프](notes/assets/btc_spot_case.png)](notes/strategy_examples.md#5-btc-사례) | [![선물 롱숏 성과 그래프](notes/assets/alt_futures_case_preview.png)](notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교) |
+| **CAGR 80.03% · 최대낙폭 -35.78%**<br>2019-09-25 ~ 2026-10-27 | **누적수익률 1위: CAGR 40.88% · 최대낙폭 -35.05%**<br>2020-01-01 ~ 2026-10-27 |
+
+그림을 누르면 해당 사례의 전략 설정·성과·분석으로 이동합니다. 선물 미리보기는
+전체 기간 성과로 고른 1·2위 조합이며, 각 사례의 비교 기준과 비용 조건은 상세 보고서에 적었습니다.
+
 ## 시스템 구성
 
 | 구성 요소 | 역할 |
