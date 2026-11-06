@@ -14,53 +14,22 @@
 
 ## 백테스트 사례 미리보기
 
-각 칸은 하나의 사례입니다. 그림 위쪽은 성과 지수, 아래쪽은 고점 대비 낙폭입니다.
-
-<table>
-<tr>
-<td width="50%" valign="top">
-<h3>01. 국내 주식</h3>
-<p><strong>순위 모멘텀·시장 확산도</strong><br><sub>2016-01-04 ~ 2026-09-21</sub></p>
-<p><strong>CAGR 30.94%</strong><br><strong>최대낙폭 -28.17%</strong></p>
-<p><sub>비교: KOSPI<br>CAGR 13.25% · 최대낙폭 -43.90%</sub></p>
-<a href="notes/strategy_examples.md#3-국내-주식-사례"><img src="notes/assets/kr_stock_case.png" alt="국내 주식 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#3-국내-주식-사례"><strong>사례 자세히 보기 →</strong></a></p>
-</td>
-<td width="50%" valign="top">
-<h3>02. 미국 ETF</h3>
-<p><strong>상승월·추세 지속성</strong><br><sub>2012-05-01 ~ 2026-05-29</sub></p>
-<p><strong>CAGR 36.16%</strong><br><strong>최대낙폭 -32.15%</strong></p>
-<p><sub>비교: 원화 환산 SPY<br>CAGR 17.08% · 최대낙폭 -29.62%</sub></p>
-<a href="notes/strategy_examples.md#4-미국-etf-사례"><img src="notes/assets/us_etf_case.png" alt="미국 ETF 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#4-미국-etf-사례"><strong>사례 자세히 보기 →</strong></a></p>
-</td>
-</tr>
-</table>
+| 국내 주식 · 순위 모멘텀·시장 확산도 | 미국 ETF · 상승월·추세 지속성 |
+| --- | --- |
+| [![국내 주식 성과 그래프](notes/assets/kr_stock_case.png)](notes/strategy_examples.md#3-국내-주식-사례) | [![미국 ETF 성과 그래프](notes/assets/us_etf_case.png)](notes/strategy_examples.md#4-미국-etf-사례) |
+| **CAGR 30.94% · 최대낙폭 -28.17%**<br>2016-01-04 ~ 2026-09-21 | **CAGR 36.16% · 최대낙폭 -32.15%**<br>2012-05-01 ~ 2026-05-29 |
+| [국내 주식 사례 자세히 보기 →](notes/strategy_examples.md#3-국내-주식-사례) | [미국 ETF 사례 자세히 보기 →](notes/strategy_examples.md#4-미국-etf-사례) |
 
 <br>
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<h3>03. BTC 현물</h3>
-<p><strong>이동평균·변동성 필터</strong><br><sub>2019-09-25 ~ 2026-10-27</sub></p>
-<p><strong>CAGR 80.03%</strong><br><strong>최대낙폭 -35.78%</strong></p>
-<p><sub>비교: BTC 보유<br>CAGR 38.90% · 최대낙폭 -74.85%</sub></p>
-<a href="notes/strategy_examples.md#5-btc-사례"><img src="notes/assets/btc_spot_case.png" alt="BTC 현물 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#5-btc-사례"><strong>사례 자세히 보기 →</strong></a></p>
-</td>
-<td width="50%" valign="top">
-<h3>04. 코인 선물</h3>
-<p><strong>거래대금·수익률 그룹 롱숏</strong><br><sub>2020-01-01 ~ 2026-10-27</sub></p>
-<p><strong>CAGR 40.88%</strong><br><strong>최대낙폭 -35.05%</strong></p>
-<p><sub>비교: BTC 가격 보유<br>CAGR 42.55% · 최대낙폭 -77.24%</sub></p>
-<a href="notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교"><img src="notes/assets/alt_futures_case_preview.png" alt="BTC 제외 USDT 무기한 선물 성과 지수와 낙폭" width="100%"></a>
-<p><a href="notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교"><strong>사례 자세히 보기 →</strong></a></p>
-</td>
-</tr>
-</table>
+| BTC 현물 · 이동평균·변동성 필터 | BTC 제외 USDT 무기한 선물 · 그룹별 롱숏 |
+| --- | --- |
+| [![BTC 현물 성과 그래프](notes/assets/btc_spot_case.png)](notes/strategy_examples.md#5-btc-사례) | [![선물 롱숏 성과 그래프](notes/assets/alt_futures_case_preview.png)](notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교) |
+| **CAGR 80.03% · 최대낙폭 -35.78%**<br>2019-09-25 ~ 2026-10-27 | **누적수익률 1위: CAGR 40.88% · 최대낙폭 -35.05%**<br>2020-01-01 ~ 2026-10-27 |
+| [BTC 현물 사례 자세히 보기 →](notes/strategy_examples.md#5-btc-사례) | [선물 롱숏 사례 자세히 보기 →](notes/strategy_examples.md#6-알트코인-선물-거래대금주간-수익률-그룹-비교) |
 
-선물 사례는 BTC를 제외한 USDT 무기한 선물입니다. 수치는 전체 기간 누적수익률 1위 조합이며, 그래프는 1·2위를 함께 표시합니다. 비교 기준과 비용 조건은 각 사례 보고서에 적었습니다.
+그림이나 ‘사례 자세히 보기’ 링크를 누르면 해당 사례의 전략 설정·성과·분석으로 이동합니다. 선물 미리보기는
+전체 기간 성과로 고른 1·2위 조합이며, 각 사례의 비교 기준과 비용 조건은 상세 보고서에 적었습니다.
 
 ## 시스템 구성
 
