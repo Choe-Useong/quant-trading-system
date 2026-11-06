@@ -10,23 +10,7 @@
 
 ## 전체 구조
 
-```mermaid
-flowchart TD
-  A[데이터 준비]
-  B[전략 설정]
-  C[신호·비중 계산]
-  D[후보 전략 검증]
-  E[매매 계획 생성]
-  F[주문 실행]
-  G[성과·계좌 기록]
-
-  A --> B
-  B --> C
-  C -->|연구| D
-  C -->|운영| E
-  E --> F
-  F --> G
-```
+![퀀트 트레이딩 시스템 아키텍처](notes/assets/system_architecture.png)
 
 ## 시스템 구성
 
