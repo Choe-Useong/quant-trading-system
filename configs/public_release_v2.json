@@ -150,7 +150,10 @@
     "us_stock_live/trading/rebalance_plan.py",
     "us_stock_live/trading/run_auto_rebalance.py",
     "us_stock_live/trading/run_rebalance.py",
-    "us_stock_live/trading/state.py"
+    "us_stock_live/trading/state.py",
+    "notes/assets/system_architecture.png",
+    "notes/assets/alt_ls9_72_top5_index.png",
+    "notes/assets/alt_ls9_72_cagr_heatmap.png"
   ],
   "preserve": [
     ".gitignore",
@@ -161,10 +164,7 @@
     "live/run_live_job_v2.cmd",
     "live/run_live_job_v2.py",
     "kr_stock_live/configs/active_profile.example.json",
-    "us_stock_live/configs/active_profile.example.json",
-    "notes/assets/system_architecture.png",
-    "notes/assets/alt_ls9_72_top5_index.png",
-    "notes/assets/alt_ls9_72_cagr_heatmap.png"
+    "us_stock_live/configs/active_profile.example.json"
   ],
   "deny": [
     ".env",

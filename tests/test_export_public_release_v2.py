@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -16,6 +17,11 @@ from scripts.export_public_release_v2 import (
 
 
 class PublicReleaseV2Test(unittest.TestCase):
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/"
+        "AAX+Av4N70a4AAAAAElFTkSuQmCC"
+    )
+
     def _roots(self, directory: str) -> tuple[Path, Path]:
         root = Path(directory)
         source = root / "source"
@@ -127,6 +133,44 @@ class PublicReleaseV2Test(unittest.TestCase):
 
             self.assertIn("denied_public_path:.env", plan.blocked)
             self.assertFalse(plan.is_safe)
+
+    def test_png_sync_preserves_exact_bytes_and_detects_changed_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source, public = self._roots(directory)
+            (source / "chart.png").write_bytes(self.PNG)
+            (public / "chart.png").write_bytes(b"old image")
+            manifest = self._manifest(include=("chart.png",))
+            plan = build_plan(source, public, manifest)
+            self.assertTrue(plan.is_safe)
+            self.assertEqual(plan.changed, ("chart.png",))
+            apply_plan(source, public, plan, prune=False,
+                       require_clean_source=False, require_clean_public=False)
+            self.assertEqual((public / "chart.png").read_bytes(), self.PNG)
+            self.assertFalse(build_plan(source, public, manifest).has_drift)
+
+    def test_invalid_png_and_other_binary_formats_are_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source, public = self._roots(directory)
+            for payload in (b"not a PNG", self.PNG[:-1], self.PNG + b"extra",
+                            self.PNG[:45] + b"x" + self.PNG[46:]):
+                (source / "chart.png").write_bytes(payload)
+                plan = build_plan(source, public, self._manifest(include=("chart.png",)))
+                self.assertIn("invalid_png:chart.png", plan.blocked)
+            (source / "payload.bin").write_bytes(self.PNG)
+            plan = build_plan(source, public, self._manifest(include=("payload.bin",)))
+            self.assertIn("binary_file:payload.bin", plan.blocked)
+
+    def test_png_metadata_still_undergoes_secret_scan(self) -> None:
+        import zlib
+
+        with tempfile.TemporaryDirectory() as directory:
+            source, public = self._roots(directory)
+            payload = b"Comment\x00TOKEN_ABC12345"
+            chunk = (len(payload).to_bytes(4, "big") + b"tEXt" + payload
+                     + zlib.crc32(b"tEXt" + payload).to_bytes(4, "big"))
+            (source / "chart.png").write_bytes(self.PNG[:-12] + chunk + self.PNG[-12:])
+            plan = build_plan(source, public, self._manifest(include=("chart.png",)))
+            self.assertIn("forbidden_content:test_token:chart.png", plan.blocked)
 
     def test_ignored_generated_files_do_not_create_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

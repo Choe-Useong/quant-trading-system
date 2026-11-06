@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -182,11 +183,45 @@ def _same_release_content(source: Path, public: Path) -> bool:
     return source_bytes == public_bytes
 
 
+def _is_png(data: bytes) -> bool:
+    """Check PNG framing and chunk checksums without an image-library dependency."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    offset = 8
+    saw_image_data = False
+    while offset + 12 <= len(data):
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + size
+        if end > len(data):
+            return False
+        payload = data[offset + 8:end - 4]
+        checksum = int.from_bytes(data[end - 4:end], "big")
+        if zlib.crc32(kind + payload) != checksum:
+            return False
+        if offset == 8:
+            if (kind != b"IHDR" or size != 13
+                    or int.from_bytes(payload[:4], "big") == 0
+                    or int.from_bytes(payload[4:8], "big") == 0):
+                return False
+        elif kind == b"IHDR":
+            return False
+        if kind == b"IDAT":
+            saw_image_data = True
+        if kind == b"IEND":
+            return size == 0 and saw_image_data and end == len(data)
+        offset = end
+    return False
+
+
 def _scan_content(path: Path, relative_path: str, patterns: Iterable[ContentPattern]) -> list[str]:
     if path.stat().st_size > MAX_SECRET_SCAN_BYTES:
         return [f"oversized_for_secret_scan:{relative_path}"]
     data = path.read_bytes()
-    if b"\x00" in data:
+    if path.suffix.lower() == ".png":
+        if not _is_png(data):
+            return [f"invalid_png:{relative_path}"]
+    elif b"\x00" in data:
         return [f"binary_file:{relative_path}"]
     text = data.decode("utf-8", errors="replace")
     return [
