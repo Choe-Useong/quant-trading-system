@@ -173,6 +173,78 @@ SSO 대비 초과수익이 양수였다.
 | 워크포워드 후보 선택: SSO 대비 AIR | 32.86% | -32.15% | 1.06 |
 | 원화 환산 SSO | 24.94% | -56.74% | 0.82 |
 
+### 4.5 SSO 비교 캐시 재생성
+
+프로젝트 루트의 PowerShell에서 아래 명령을 실행한다. 기존 33개 ETF 원화 캐시와
+`data/stocks_cache/us_etf_leveraged_2x_daily/signal_price.parquet`가 필요하다.
+데이터 캐시는 공개 저장소에 포함하지 않으므로 다른 컴퓨터에는 입력 캐시도 별도로 옮겨야 한다.
+다시 다운로드한 수정주가는 과거 값이 달라질 수 있어, 동일 결과 재현에는 같은 입력 파일을 사용한다.
+
+기존 캐시에 SSO 수정주가와 기존 `DEXKOUS` 환율로 환산한 가격을 추가한다.
+기존 종목·유니버스는 유지하고, 입력·출력 SHA-256과 처리 방법은 출력 캐시 폴더의
+`source_cache_report.json`에 기록한다. 이미 있는 출력이 계산 결과와 다르면 덮어쓰지 않고 중단한다.
+
+```powershell
+@'
+import hashlib, json
+from datetime import datetime, timezone
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+cfg_path = Path("configs/stocks/grid_us_etf_positive_month_numeric9_sso_benchmark_v2.json")
+base_path = Path("configs/stocks/grid_us_etf_positive_month_numeric9_v2.json")
+cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+base = json.loads(base_path.read_text(encoding="utf-8"))
+src, dst = Path(base["source_cache_dir"]), Path(cfg["source_cache_dir"])
+usd_path = Path("data/stocks_cache/us_etf_leveraged_2x_daily/signal_price.parquet")
+assert src.resolve() != dst.resolve()
+names = ("trade_price", "signal_price", "market_warning", "market_meta")
+inputs = [cfg_path, base_path, usd_path] + [src / (n + ".parquet") for n in names]
+digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+input_hashes = {p.as_posix(): digest(p) for p in inputs}
+frames = {n: pd.read_parquet(src / (n + ".parquet")) for n in names}
+trade, signal = frames["trade_price"], frames["signal_price"]
+usd = pd.read_parquet(usd_path)["SSO"]
+assert usd.index.is_unique and usd.index.is_monotonic_increasing
+aligned = usd.reindex(trade.index)
+fx = trade["DEXKOUS"]
+converted = aligned * fx
+period = converted.loc["2012-05-01":"2026-05-29"]
+assert len(period) == 3540 and np.isfinite(period).all() and period.gt(0).all()
+assert "SSO-KRW" not in cfg["universe_spec_template"]["allowed_markets"]
+trade["SSO-KRW"], signal["SSO-KRW"] = converted, aligned
+frames["market_warning"]["SSO-KRW"] = np.where(converted.notna(), "NONE", None)
+meta = frames["market_meta"]
+assert not meta["market"].eq("SSO-KRW").any()
+meta.loc[len(meta)] = dict(market="SSO-KRW", korean_name="SSO-KRW",
+                          english_name="SSO-KRW", market_warning="NONE")
+# Refuse to overwrite an existing cache with different data.
+for name, frame in frames.items():
+    path = dst / (name + ".parquet")
+    if path.exists():
+        assert pd.read_parquet(path).equals(frame), f"Existing cache differs: {path}"
+dst.mkdir(parents=True, exist_ok=True)
+for name, frame in frames.items():
+    path = dst / (name + ".parquet")
+    if not path.exists():
+        frame.to_parquet(path)
+report = {
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    "method": "Append SSO adjusted USD close and SSO * existing DEXKOUS to base cache",
+    "input_sha256": input_hashes,
+    "output_sha256": {n + ".parquet": digest(dst / (n + ".parquet")) for n in names},
+    "benchmark": "SSO-KRW", "source_adjustment": "Existing Yahoo adjusted-close cache",
+    "fx": "Existing base trade_price.DEXKOUS; no download, fill or FX recalculation",
+    "evaluation": {"start": str(period.index[0]), "end": str(period.index[-1]), "rows": len(period)},
+    "universe": "Base strategy universe unchanged; SSO is benchmark only",
+}
+(dst / "source_cache_report.json").write_text(
+    json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print("Cache and source_cache_report.json ready:", dst)
+'@ | py -X utf8 -
+```
+
 ## 5. BTC 사례
 
 ### 5.1 전략 명세
