@@ -36,6 +36,7 @@
     </td>
   </tr>
 </table>
+
 ### 1.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
@@ -148,6 +149,7 @@
     </td>
   </tr>
 </table>
+
 ### 3.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
@@ -204,6 +206,7 @@
     </td>
   </tr>
 </table>
+
 ### 4.3 조합 평가 · 주요 특성
 
 <p align="center"><a href="assets/alt_ls9_72_cagr_heatmap.png"><img src="assets/alt_ls9_72_cagr_heatmap.png" alt="72개 롱숏 조합의 CAGR" width="480"></a></p>
