@@ -209,18 +209,30 @@
 
 ### 4.3 조합 평가 · 주요 특성
 
-<p align="center"><a href="assets/alt_ls9_72_cagr_heatmap.png"><img src="assets/alt_ls9_72_cagr_heatmap.png" alt="72개 롱숏 조합의 CAGR" width="480"></a></p>
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top">
+      <a href="assets/alt_ls9_72_cagr_heatmap.png"><img src="assets/alt_ls9_72_cagr_heatmap.png" alt="72개 롱숏 조합의 CAGR" width="100%"></a>
+    </td>
+    <td width="50%" valign="top">
+      <table width="100%">
+        <tr><th width="29%" align="left" valign="top">선정 방식</th><td valign="top">전체 기간 누적수익률 1위 조합(사후 선정) · 누적수익률 <strong>938.12%</strong></td></tr>
+        <tr><th width="29%" align="left" valign="top">조합 분포</th><td valign="top">72개 중 누적수익률 양수 22개</td></tr>
+        <tr><th width="29%" align="left" valign="top">공통 숏 그룹</th><td valign="top">거래대금 상위·수익률 하위 숏을 쓴 8개 조합 모두 양수 · CAGR 8.18~40.88%</td></tr>
+        <tr><th width="29%" align="left" valign="top">연도별 특성</th><td valign="top">1위 조합 2021년 +219.25% · 2022년 +9.29% · 2025년 +6.89%</td></tr>
+        <tr><th width="29%" align="left" valign="top">유니버스 변화</th><td valign="top">실제 평균 보유 종목 수: 2020년 7.1개 → 2026년 115.1개</td></tr>
+        <tr><th width="29%" align="left" valign="top">수익 구성</th><td valign="top">초기자금 10,000 USDT · 롱 55,320.01 / 숏 38,491.71 USDT 순이익 기여</td></tr>
+        <tr><th width="29%" align="left" valign="top">종목 집중</th><td valign="top">DOGE·OMG가 전체 순이익의 13.57% · 상위 5종목 27.49%</td></tr>
+        <tr><th width="29%" align="left" valign="top">검증 범위</th><td valign="top">72개 전체 기간 비교 · 연도별 성과·종목 집중도 평가</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 
-| 항목 | 결과 |
+**데이터·체결 가정**
+
+| 항목 | 적용 기준 |
 | --- | --- |
-| 선정 방식 | 전체 기간 누적수익률 1위 조합(사후 선정) · 누적수익률 **938.12%** |
-| 조합 분포 | 72개 중 누적수익률 양수 22개 |
-| 공통 숏 그룹 | 거래대금 상위·수익률 하위 숏을 쓴 8개 조합 모두 양수 · CAGR 8.18~40.88% |
-| 연도별 특성 | 1위 조합 2021년 +219.25% · 2022년 +9.29% · 2025년 +6.89% |
-| 유니버스 변화 | 실제 평균 보유 종목 수: 2020년 7.1개 → 2026년 115.1개 |
-| 수익 구성 | 초기자금 10,000 USDT · 롱 55,320.01 / 숏 38,491.71 USDT 순이익 기여 |
-| 종목 집중 | DOGE·OMG가 전체 순이익의 13.57% · 상위 5종목 27.49% |
-| 검증 범위 | 72개 전체 기간 비교 · 연도별 성과·종목 집중도 평가 |
 | 계약 기준 | 2026-11-02 계약 규칙 스냅샷 |
 | 데이터 가정 | 누락 펀딩 직전 관측값 대체 · 가격 충돌·필수 가격 누락 종목 제외 |
 | 청산·상폐 | 마크가격 OHLC 강제청산 · 상폐 마지막 유효 시가 · 격리담보 초과손실 보전 기록 |
