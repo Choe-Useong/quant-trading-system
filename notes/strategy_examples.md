@@ -19,18 +19,23 @@
 
 ### 1.2 백테스트 성과
 
-![국내 주식 전략과 KOSPI200의 성과 지수 및 낙폭](assets/kr_stock_case.png)
-
-| 지표 | 전략 | KOSPI200 |
-| --- | ---: | ---: |
-| 누적수익률 | 2,685.08% | 374.01% |
-| CAGR | **37.61%** | 16.09% |
-| MDD | **-57.79%** | -41.19% |
-| Sharpe | 1.22 | 0.72 |
-| Calmar | 0.65 | 0.39 |
-| 최장 회복기간 | 745거래일 | — |
-| 순손익 집중 | SK하이닉스·SK스퀘어·삼성전자 합계 45.6% | — |
-
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><a href="assets/kr_stock_case.png"><img src="assets/kr_stock_case.png" alt="국내 주식 전략과 KOSPI200의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" valign="top">
+      <table width="100%">
+        <tr><th align="left">지표</th><th align="right">전략</th><th align="right">KOSPI200</th></tr>
+        <tr><td valign="top" align="left">누적수익률</td><td valign="top" align="right">2,685.08%</td><td valign="top" align="right">374.01%</td></tr>
+        <tr><td valign="top" align="left">CAGR</td><td valign="top" align="right"><strong>37.61%</strong></td><td valign="top" align="right">16.09%</td></tr>
+        <tr><td valign="top" align="left">MDD</td><td valign="top" align="right"><strong>-57.79%</strong></td><td valign="top" align="right">-41.19%</td></tr>
+        <tr><td valign="top" align="left">Sharpe</td><td valign="top" align="right">1.22</td><td valign="top" align="right">0.72</td></tr>
+        <tr><td valign="top" align="left">Calmar</td><td valign="top" align="right">0.65</td><td valign="top" align="right">0.39</td></tr>
+        <tr><td valign="top" align="left">최장 회복기간</td><td valign="top" align="right">745거래일</td><td valign="top" align="right">—</td></tr>
+        <tr><td valign="top" align="left">순손익 집중</td><td valign="top" align="right">SK하이닉스·SK스퀘어·삼성전자 합계 45.6%</td><td valign="top" align="right">—</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 ### 1.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
@@ -71,19 +76,24 @@
 
 ### 2.2 백테스트 성과
 
-![미국 ETF 전략과 원화 환산 SSO의 성과 지수 및 낙폭](assets/us_etf_case.png)
-
-| 지표 | 전략 | 원화 환산 SSO |
-| --- | ---: | ---: |
-| 누적수익률 | 7,529.52% | 2,652.78% |
-| CAGR | **36.16%** | 26.63% |
-| MDD | **-32.15%** | -56.74% |
-| Sharpe | 1.14 | 0.88 |
-| Calmar | 1.12 | 0.47 |
-| 최장 회복기간 | 338거래일 | — |
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 전략과 원화 환산 SSO의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" valign="top">
+      <table width="100%">
+        <tr><th align="left">지표</th><th align="right">전략</th><th align="right">원화 환산 SSO</th></tr>
+        <tr><td valign="top" align="left">누적수익률</td><td valign="top" align="right">7,529.52%</td><td valign="top" align="right">2,652.78%</td></tr>
+        <tr><td valign="top" align="left">CAGR</td><td valign="top" align="right"><strong>36.16%</strong></td><td valign="top" align="right">26.63%</td></tr>
+        <tr><td valign="top" align="left">MDD</td><td valign="top" align="right"><strong>-32.15%</strong></td><td valign="top" align="right">-56.74%</td></tr>
+        <tr><td valign="top" align="left">Sharpe</td><td valign="top" align="right">1.14</td><td valign="top" align="right">0.88</td></tr>
+        <tr><td valign="top" align="left">Calmar</td><td valign="top" align="right">1.12</td><td valign="top" align="right">0.47</td></tr>
+        <tr><td valign="top" align="left">최장 회복기간</td><td valign="top" align="right">338거래일</td><td valign="top" align="right">—</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 
 **비교 기준:** SSO 수정주가를 기존 환율로 원화 환산 · SSO 보유 수익률에는 별도 거래 수수료 미반영.
-
 ### 2.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
@@ -122,17 +132,22 @@
 
 ### 3.2 백테스트 성과
 
-![BTC 현물 전략과 BTC 보유의 성과 지수 및 낙폭](assets/btc_spot_case.png)
-
-| 지표 | 전략 | BTC 보유 |
-| --- | ---: | ---: |
-| 누적수익률 | 6,333.00% | 924.93% |
-| CAGR | **80.03%** | 38.90% |
-| MDD | **-35.78%** | -74.85% |
-| Sharpe | 1.91 | 0.88 |
-| Calmar | 2.24 | 0.52 |
-| 최장 회복기간 | 12,224시간 | — |
-
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><a href="assets/btc_spot_case.png"><img src="assets/btc_spot_case.png" alt="BTC 현물 전략과 BTC 보유의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" valign="top">
+      <table width="100%">
+        <tr><th align="left">지표</th><th align="right">전략</th><th align="right">BTC 보유</th></tr>
+        <tr><td valign="top" align="left">누적수익률</td><td valign="top" align="right">6,333.00%</td><td valign="top" align="right">924.93%</td></tr>
+        <tr><td valign="top" align="left">CAGR</td><td valign="top" align="right"><strong>80.03%</strong></td><td valign="top" align="right">38.90%</td></tr>
+        <tr><td valign="top" align="left">MDD</td><td valign="top" align="right"><strong>-35.78%</strong></td><td valign="top" align="right">-74.85%</td></tr>
+        <tr><td valign="top" align="left">Sharpe</td><td valign="top" align="right">1.91</td><td valign="top" align="right">0.88</td></tr>
+        <tr><td valign="top" align="left">Calmar</td><td valign="top" align="right">2.24</td><td valign="top" align="right">0.52</td></tr>
+        <tr><td valign="top" align="left">최장 회복기간</td><td valign="top" align="right">12,224시간</td><td valign="top" align="right">—</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 ### 3.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
@@ -172,20 +187,26 @@
 
 ### 4.2 백테스트 성과
 
-![72개 롱숏 조합의 CAGR](assets/alt_ls9_72_cagr_heatmap.png)
-
-![상위 5개 롱숏 조합과 BTC 보유 성과·낙폭](assets/alt_ls9_72_top5_index.png)
-
-| 순위 | 롱 그룹: 거래대금 / 수익률 | 숏 그룹: 거래대금 / 수익률 | CAGR | MDD | Sharpe |
-| --- | --- | --- | ---: | ---: | ---: |
-| 1 | 하위 / 하위 | 상위 / 하위 | **40.88%** | -35.05% | 1.32 |
-| 2 | 하위 / 중간 | 상위 / 하위 | 28.14% | -29.19% | 1.11 |
-| 3 | 상위 / 상위 | 상위 / 하위 | 27.44% | -41.91% | 1.00 |
-| 4 | 중간 / 상위 | 상위 / 하위 | 25.00% | -42.57% | 0.92 |
-| 5 | 중간 / 하위 | 상위 / 하위 | 20.74% | -44.99% | 0.83 |
-| 비교 | BTC 가격 보유 | — | 42.55% | -77.24% | 0.89 |
-
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><a href="assets/alt_ls9_72_top5_index.png"><img src="assets/alt_ls9_72_top5_index.png" alt="상위 5개 롱숏 조합과 BTC 보유 성과·낙폭" width="100%"></a></td>
+    <td width="50%" valign="top">
+      <strong>1~5위 숏 그룹: 거래대금 상위 / 수익률 하위</strong><br>
+      <table width="100%">
+        <tr><th align="left">순위 · 롱 그룹</th><th align="right">CAGR</th><th align="right">MDD</th><th align="right">Sharpe</th></tr>
+        <tr><td valign="top" align="left">1 · 하위 / 하위</td><td valign="top" align="right"><strong>40.88%</strong></td><td valign="top" align="right">-35.05%</td><td valign="top" align="right">1.32</td></tr>
+        <tr><td valign="top" align="left">2 · 하위 / 중간</td><td valign="top" align="right">28.14%</td><td valign="top" align="right">-29.19%</td><td valign="top" align="right">1.11</td></tr>
+        <tr><td valign="top" align="left">3 · 상위 / 상위</td><td valign="top" align="right">27.44%</td><td valign="top" align="right">-41.91%</td><td valign="top" align="right">1.00</td></tr>
+        <tr><td valign="top" align="left">4 · 중간 / 상위</td><td valign="top" align="right">25.00%</td><td valign="top" align="right">-42.57%</td><td valign="top" align="right">0.92</td></tr>
+        <tr><td valign="top" align="left">5 · 중간 / 하위</td><td valign="top" align="right">20.74%</td><td valign="top" align="right">-44.99%</td><td valign="top" align="right">0.83</td></tr>
+        <tr><td valign="top" align="left">비교 · BTC 보유</td><td valign="top" align="right">42.55%</td><td valign="top" align="right">-77.24%</td><td valign="top" align="right">0.89</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 ### 4.3 조합 평가 · 주요 특성
+
+<p align="center"><a href="assets/alt_ls9_72_cagr_heatmap.png"><img src="assets/alt_ls9_72_cagr_heatmap.png" alt="72개 롱숏 조합의 CAGR" width="480"></a></p>
 
 | 항목 | 결과 |
 | --- | --- |
