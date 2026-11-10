@@ -6,7 +6,7 @@
 >
 > 시스템의 구조와 구현 방식을 확인할 수 있도록 선별한 공개본입니다. 실제 운용 전략, 활성 프로필, 계좌 정보, 원천 데이터, 주문·체결 기록은 포함하지 않습니다. 공개된 설정은 구조 설명과 재현 가능한 예시를 위한 자료이며 현재 운용 상태를 나타내지 않습니다.
 
-[기능 목록](notes/feature_inventory.md) · [설정 레퍼런스](notes/config_reference_v2.md) · [백테스트 사례](notes/strategy_examples.md)
+[백테스트 요약](notes/strategy_summary.md) · [상세 백테스트 보고서](notes/strategy_examples.md) · [기능 목록](notes/feature_inventory.md) · [설정 레퍼런스](notes/config_reference_v2.md)
 
 ## 전체 구조
 
@@ -49,4 +49,5 @@
 | --- | --- |
 | [기능 목록](notes/feature_inventory.md) | 구현된 연구·검증·라이브 기능 |
 | [설정 파일 레퍼런스](notes/config_reference_v2.md) | 전략 설정 옵션 |
-| [백테스트 사례](notes/strategy_examples.md) | 연구 과정에서 선정한 사례의 성과와 검증 결과 |
+| [백테스트 요약](notes/strategy_summary.md) | 4개 시장의 핵심 설정·성과·검증 결과 요약 |
+| [상세 백테스트 보고서](notes/strategy_examples.md) | 전략별 검증 설정, 비교 및 재현 관련 상세 내용 |
