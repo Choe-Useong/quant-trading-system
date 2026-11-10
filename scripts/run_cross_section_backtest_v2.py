@@ -16,9 +16,13 @@ from lib.feature_graph_v2 import referenced_markets_for_feature_specs
 from lib.features_v2 import build_feature_frames_from_cache
 from lib.market_scores_v2 import build_market_score_frame, required_markets_for_market_score_spec
 from lib.spec_io import load_feature_specs, load_market_score_spec, load_universe_spec, load_weight_spec
-from lib.universe_v2 import build_universe_mask_v2
+from lib.universe_v2 import build_universe_mask_v2, validate_holding_selection_config
 from lib.weights_v2 import build_weight_frame_v2, is_change_only_weight_output, to_change_only_target_frame
-from lib.vectorbt_adapter import VectorBTSpec, run_portfolio_from_target_weights
+from lib.vectorbt_adapter import VectorBTSpec
+from lib.backtest_engine_v2 import resolve_benchmark_curve_v2 as resolve_benchmark_curve
+from lib.backtest_engine_v2 import DEFAULT_ARTIFACT_FORMAT, BacktestResultV2, run_backtest_v2, write_backtest_frame
+from lib.backtest_engine_v2 import apply_observed_universe_policy_v2, record_data_policy_audit_v2, funding_usage_starts_v2
+from lib.backtest_engine_v2 import write_backtest_analysis_v2, record_execution_availability_summary_v2
 from scripts.run_vectorbt import (
     benchmark_comparison_period_summary,
     benchmark_summary,
@@ -36,12 +40,10 @@ from scripts.run_vectorbt import (
     periods_per_day_for_timeframe,
     print_summary,
     resolve_periods_per_year,
-    resolve_benchmark_curve,
     summarize_rolling_information_ratio,
     strategy_performance_summary,
     timeframe_to_pandas_freq,
     trim_frames_to_first_weight,
-    write_equity_csv,
     write_summary_csv,
 )
 
@@ -63,8 +65,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-spec-json", required=True, help="Weight spec JSON path")
     parser.add_argument("--portfolio-dir", required=True, help="Output directory for v2 weight files")
     parser.add_argument("--backtest-out-dir", required=True, help="Output directory for vectorbt backtest files")
+    parser.add_argument("--artifact-format", choices=["csv", "parquet"], default=DEFAULT_ARTIFACT_FORMAT,
+                        help="Equity/account output format (default: parquet); Parquet uses lossless Zstd compression")
     parser.add_argument("--fees", type=float, default=0.0, help="Per-order proportional fees")
     parser.add_argument("--slippage", type=float, default=0.0, help="Per-order proportional slippage")
+    parser.add_argument("--init-cash", type=float, default=1_000_000.0, help="Starting account equity")
+    parser.add_argument("--engine", choices=["vectorbt", "freqtrade", "numba_futures"], default="vectorbt", help="v2 execution engine")
+    parser.add_argument("--freqtrade-spec-json", default="", help="Optional JSON containing freqtrade adapter settings")
+    parser.add_argument("--numba-futures-spec-json", default="", help="JSON containing explicit numba_futures contract and execution settings")
+    parser.add_argument("--timeframe", default=None, help="daily or minutes such as 60m; defaults to candle-dir inference")
     parser.add_argument(
         "--periods-per-year",
         type=int,
@@ -125,12 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-excess-returns-csv",
         action="store_true",
-        help="Write excess_returns.csv; disabled by default to reduce output size",
+        help="Write excess_returns in --artifact-format; disabled by default to reduce output size",
     )
     parser.add_argument(
         "--save-rolling-ir-csv",
         action="store_true",
-        help="Write rolling_information_ratio.csv; disabled by default to reduce output size",
+        help="Write rolling_information_ratio in --artifact-format; disabled by default to reduce output size",
     )
     return parser
 
@@ -198,11 +207,17 @@ def main() -> None:
     out_dir = Path(args.backtest_out_dir)
     portfolio_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+    backtest_payload = {
+        "engine": args.engine,
+        "freqtrade": json.loads(Path(args.freqtrade_spec_json).read_text(encoding="utf-8-sig")) if args.freqtrade_spec_json else {},
+        "numba_futures": json.loads(Path(args.numba_futures_spec_json).read_text(encoding="utf-8-sig")) if args.numba_futures_spec_json else {},
+    }
 
     feature_specs = load_feature_specs(Path(args.feature_spec_json))
     market_score_spec = load_market_score_spec(Path(args.market_scores_spec_json)) if args.market_scores_spec_json else None
     universe_spec = load_universe_spec(Path(args.universe_spec_json))
     weight_spec = load_weight_spec(Path(args.weight_spec_json))
+    validate_holding_selection_config(universe_spec, weight_spec, backtest_payload)
     required_feature_markets = _resolve_required_feature_markets(feature_specs, universe_spec, market_score_spec)
     output_feature_markets = _resolve_output_feature_markets(universe_spec)
     effective_max_markets = None if required_feature_markets is not None else args.max_markets
@@ -214,6 +229,7 @@ def main() -> None:
         output_market_columns=output_feature_markets,
         max_markets=effective_max_markets,
         tail_rows=args.tail_hours,
+        data_usage_starts=funding_usage_starts_v2(source_cache_dir, backtest_payload),
     )
     if market_score_spec is not None:
         feature_frames[market_score_spec.output_column] = build_market_score_frame(feature_frames, market_score_spec)
@@ -225,9 +241,13 @@ def main() -> None:
     )
     reference_index = next(iter(feature_frames.values())).index if feature_frames else warning_frame.index
     warning_frame = warning_frame.reindex(index=reference_index)
+    universe_spec, data_exclusions = apply_observed_universe_policy_v2(
+        source_cache_dir, reference_index, next(iter(feature_frames.values())).columns, universe_spec, backtest_payload,
+        required_markets=[weight_spec.hedge.market] if weight_spec.hedge is not None else ())
 
     universe_result = build_universe_mask_v2(feature_frames, warning_frame, universe_spec)
-    weight_frame = build_weight_frame_v2(universe_result.selection_mask, weight_spec, feature_frames)
+    weight_frame = build_weight_frame_v2(universe_result.selection_mask, weight_spec, feature_frames,
+                                       base_eligible_mask=universe_result.base_eligible_mask)
     change_only_weights = is_change_only_weight_output(weight_spec)
     if change_only_weights:
         weight_frame = weight_frame.ffill().fillna(0.0)
@@ -249,6 +269,8 @@ def main() -> None:
     price_market_columns = None
     if required_feature_markets is not None:
         price_market_set = set(required_feature_markets)
+        if weight_spec.hedge is not None:
+            price_market_set.update(weight_frame.columns)
         if benchmark_uses_strategy_price_frame:
             price_market_set.add(benchmark_market)
         price_market_columns = sorted(price_market_set)
@@ -279,39 +301,48 @@ def main() -> None:
             & (benchmark_price_frame.index <= price_frame.index.max())
         ]
     if change_only_weights:
-        weight_frame = to_change_only_target_frame(weight_frame)
+        weight_frame = to_change_only_target_frame(weight_frame, scope=weight_spec.change_only_scope)
 
-    timeframe = infer_timeframe(Path(args.candle_dir), None)
+    timeframe = infer_timeframe(Path(args.candle_dir), args.timeframe)
     periods_per_year = resolve_periods_per_year(timeframe, args.periods_per_year)
     periods_per_day = periods_per_day_for_timeframe(timeframe)
     pandas_freq = timeframe_to_pandas_freq(timeframe)
 
-    portfolio = run_portfolio_from_target_weights(
+    portfolio = run_backtest_v2(
         price_frame=price_frame,
         target_weight_frame=weight_frame,
         spec=VectorBTSpec(
             price_column=args.execution_price_column,
-            init_cash=1_000_000.0,
+            init_cash=args.init_cash,
             fees=args.fees,
             slippage=args.slippage,
             freq=pandas_freq,
         ),
+        payload=backtest_payload,
+        source_cache_dir=source_cache_dir,
+        timeframe=timeframe,
+        feature_frames=feature_frames,
     )
+    record_data_policy_audit_v2(portfolio, data_exclusions)
 
     summary = portfolio.stats(settings={"freq": pandas_freq})
+    summary = record_execution_availability_summary_v2(portfolio, summary)
     if "Benchmark Return [%]" in summary.index:
         summary = summary.rename(index={"Benchmark Return [%]": "VectorBT Benchmark Return [%]"})
     equity_curve = portfolio.value()
     benchmark_curve, benchmark_label = resolve_benchmark_curve(
+        source_cache_dir=source_cache_dir,
+        benchmark_source_cache_dir=benchmark_source_cache_dir,
+        benchmark_price_column=benchmark_price_column,
         price_frame=price_frame,
         portfolio=portfolio,
-        init_cash=1_000_000.0,
+        init_cash=args.init_cash,
         benchmark_mode=args.benchmark_mode,
         benchmark_market=benchmark_market,
         benchmark_price_frame=benchmark_price_frame,
         vectorbt_spec=VectorBTSpec(
             price_column=args.execution_price_column,
-            init_cash=1_000_000.0,
+            init_cash=args.init_cash,
             fees=args.fees,
             slippage=args.slippage,
             freq=pandas_freq,
@@ -323,11 +354,11 @@ def main() -> None:
     comparison_equity_curve, aligned_benchmark_curve = build_benchmark_comparison_curves(
         equity_curve,
         benchmark_curve,
-        1_000_000.0,
+        args.init_cash,
     )
     benchmark_stats = benchmark_summary(
         aligned_benchmark_curve,
-        1_000_000.0,
+        args.init_cash,
         benchmark_label,
         annualization_factor=periods_per_year,
         benchmark_mode=args.benchmark_mode,
@@ -351,7 +382,7 @@ def main() -> None:
     excess_returns, excess_equity_curve = compute_excess_curves(
         comparison_equity_curve,
         aligned_benchmark_curve,
-        1_000_000.0,
+        args.init_cash,
     )
     rolling_ir = compute_rolling_information_ratio(
         excess_returns,
@@ -399,20 +430,25 @@ def main() -> None:
         ]
     )
 
+    summary.loc["Artifact Format"] = args.artifact_format
+    summary = pd.concat([summary, write_backtest_analysis_v2(
+        portfolio, out_dir, equity_curve=equity_curve, init_cash=args.init_cash)])
     print_summary(summary)
-    write_summary_csv(out_dir / "summary.csv", summary)
-    write_equity_csv(out_dir / "equity_curve.csv", equity_curve)
-    write_equity_csv(out_dir / "benchmark_curve.csv", aligned_benchmark_curve)
-    write_equity_csv(out_dir / "excess_equity_curve.csv", excess_equity_curve)
+    if isinstance(portfolio, BacktestResultV2):
+        portfolio.save_artifacts(out_dir, artifact_format=args.artifact_format)
+    write_backtest_frame(out_dir / "equity_curve.csv", equity_curve, artifact_format=args.artifact_format)
+    write_backtest_frame(out_dir / "benchmark_curve.csv", aligned_benchmark_curve, artifact_format=args.artifact_format)
+    write_backtest_frame(out_dir / "excess_equity_curve.csv", excess_equity_curve, artifact_format=args.artifact_format)
     if args.save_excess_returns_csv:
-        write_equity_csv(out_dir / "excess_returns.csv", excess_returns)
+        write_backtest_frame(out_dir / "excess_returns.csv", excess_returns, artifact_format=args.artifact_format)
     if args.save_rolling_ir_csv:
-        write_equity_csv(out_dir / "rolling_information_ratio.csv", rolling_ir)
+        write_backtest_frame(out_dir / "rolling_information_ratio.csv", rolling_ir, artifact_format=args.artifact_format)
     if args.save_target_weights_full:
         weight_frame.to_csv(out_dir / "target_weights_full.csv", encoding="utf-8-sig")
+    write_summary_csv(out_dir / "summary.csv", summary)
 
     print("Resolved load mode: wide")
-    print(f"Wrote vectorbt results to {out_dir}")
+    print(f"Wrote {args.engine} results to {out_dir}")
 
 
 if __name__ == "__main__":

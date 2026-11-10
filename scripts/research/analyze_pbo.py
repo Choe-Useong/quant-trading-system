@@ -19,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from lib.feature_graph_v2 import referenced_markets_for_feature_specs, required_source_columns_for_feature_specs
 from lib.features_v2 import SUPPORTED_SOURCE_COLUMNS, build_feature_frames_from_cache
+from lib.backtest_engine_v2 import funding_usage_starts_v2
 from lib.market_scores_v2 import build_market_score_frame, required_markets_for_market_score_spec
 from lib.spec_io import (
     load_feature_specs_from_payload,
@@ -28,10 +29,18 @@ from lib.spec_io import (
     load_weight_spec_from_payload,
 )
 from scripts.run_cross_section_grid_v2 import (
+    CandidateFeatureBuilder,
+    LazyCandidateFeatures,
+    materialize_candidate_features,
+    release_candidate_features,
     _grid_combinations,
     _passes_constraints,
+    _canonical_payload_key,
+    _prepare_grid_preselection,
+    _preselected_universe_payload,
     _read_warning_frame,
     _render_value,
+    _render_backtest_payload,
     _resolve_source_cache_dir,
 )
 from scripts.walkforward.run_cross_section_grid_walkforward_v2 import (
@@ -43,6 +52,13 @@ from scripts.run_vectorbt import compute_return_series, load_price_frame
 
 
 SCORE_METRICS = ("air", "sharpe", "cvar_sharpe", "martin", "calmar", "log_return", "simple_return")
+
+# The legacy six-field tuple stays intact without preselection. Opt-in records
+# carry the shared selection plan as a seventh field for PBO and SPA replay.
+CandidateFramesPayload = (
+    tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str] | None, dict[str, pd.DataFrame], pd.DataFrame]
+    | tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str] | None, dict[str, pd.DataFrame], pd.DataFrame, dict]
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -268,13 +284,13 @@ def _build_cscv_splits(
 
 
 def _build_candidate_frames(
-    config: dict[str, Any],
+    config: dict[str, Any], *, preselection_out_dir: Path | None = None,
 ) -> tuple[
     Path,
     Path,
     str,
     list[dict[str, Any]],
-    dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str] | None, dict[str, pd.DataFrame], pd.DataFrame]],
+    dict[str, CandidateFramesPayload],
 ]:
     candle_dir_value = config.get("candle_dir") or config.get("daily_dir")
     if not candle_dir_value:
@@ -294,18 +310,28 @@ def _build_candidate_frames(
     ]
     if not combinations:
         raise SystemExit("No valid grid combinations after applying constraints")
+    preselection_plans = _prepare_grid_preselection(
+        config, source_cache_dir,
+        preselection_out_dir if preselection_out_dir is not None else Path(config.get("out_dir", "data/grid/cross_section_v2")),
+        combinations)
 
-    feature_cache: dict[tuple[str, tuple[str, ...], str], dict[str, pd.DataFrame]] = {}
-    source_frame_cache: dict[tuple[tuple[str, ...], tuple[str, ...], int | None], dict[str, pd.DataFrame]] = {}
+    # Shared features are built once (grid rule) and each candidate's frames
+    # are built when it is evaluated, then released (LazyCandidateFeatures).
+    feature_builder = CandidateFeatureBuilder(
+        config,
+        combinations,
+        source_cache_dir,
+        static_market_score_spec=static_market_score_spec,
+        preselection_plans=preselection_plans,
+        project_shared=True,
+    )
     warning_frame_cache: dict[tuple[tuple[str, ...], int | None], pd.DataFrame] = {}
-    candidate_payloads: dict[
-        str,
-        tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str] | None, dict[str, pd.DataFrame], pd.DataFrame],
-    ] = {}
+    lazy_feature_sets: dict[tuple, LazyCandidateFeatures] = {}
+    candidate_payloads: dict[str, CandidateFramesPayload] = {}
 
     first_context = dict(combinations[0])
     first_context["run_name"] = run_name_template.format(**first_context)
-    first_vectorbt_payload = _render_value(config.get("vectorbt_spec_template", {}), first_context)
+    first_vectorbt_payload = _render_backtest_payload(config, first_context)
     first_universe_payload = _render_value(config["universe_spec_template"], first_context)
     allowed_markets = first_universe_payload.get("allowed_markets", [])
     primary_market = (
@@ -322,8 +348,10 @@ def _build_candidate_frames(
         run_name = run_name_template.format(**context)
         context["run_name"] = run_name
         universe_payload = _render_value(config["universe_spec_template"], context)
+        preselection = None if preselection_plans is None else preselection_plans[_canonical_payload_key(combo)]
+        universe_payload = _preselected_universe_payload(universe_payload, preselection)
         weight_payload = _render_value(config["weight_spec_template"], context)
-        vectorbt_payload = _render_value(config.get("vectorbt_spec_template", {}), context)
+        vectorbt_payload = _render_backtest_payload(config, context)
         market_score_payload = (
             _render_value(config["market_scores_spec_template"], context)
             if config.get("market_scores_spec_template") is not None
@@ -334,57 +362,44 @@ def _build_candidate_frames(
             if market_score_payload is not None
             else static_market_score_spec
         )
-        feature_payload = _render_feature_payload(config, context)
-        feature_specs = load_feature_specs_from_payload(feature_payload)
-        required_feature_markets = _resolve_required_feature_markets(
-            feature_specs,
-            universe_payload,
-            market_score_spec,
-        )
+        weight_market_score_payload = (
+            _render_value(config["weight_market_scores_spec_template"], context)
+            if config.get("weight_market_scores_spec_template") is not None else None)
+        weight_market_score_spec = (load_market_score_spec_from_payload(weight_market_score_payload)
+                                   if weight_market_score_payload is not None else None)
+        feature_payload = feature_builder.candidate_feature_payload(context)
+        required_feature_markets = feature_builder.candidate_required_markets(
+            universe_payload, feature_payload, market_score_spec)
+        data_usage_starts = funding_usage_starts_v2(source_cache_dir, vectorbt_payload)
         output_feature_markets = _resolve_output_feature_markets(universe_payload)
+        # Candidates with identical feature inputs (e.g. weight-only grids)
+        # share one lazily built feature set.
         feature_key = (
-            json.dumps(feature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            tuple(sorted(data_usage_starts.items())),
+            _canonical_payload_key(feature_payload),
             tuple(required_feature_markets) if required_feature_markets is not None else (),
             tuple(output_feature_markets) if output_feature_markets is not None else (),
-            json.dumps(market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            if market_score_payload is not None
+            _canonical_payload_key(market_score_payload) if market_score_payload is not None
             else (str(Path(str(market_score_spec_path)).resolve()) if market_score_spec_path else ""),
+            _canonical_payload_key(weight_market_score_payload) if weight_market_score_payload is not None else "",
         )
-        feature_frames = feature_cache.get(feature_key)
+        feature_frames = lazy_feature_sets.get(feature_key)
         if feature_frames is None:
-            required_columns, uses_market_source = required_source_columns_for_feature_specs(
-                feature_specs,
-                SUPPORTED_SOURCE_COLUMNS,
+            feature_frames = LazyCandidateFeatures(
+                lambda universe_payload=universe_payload, feature_payload=feature_payload,
+                market_score_payload=market_score_payload, market_score_spec=market_score_spec,
+                weight_market_score_spec=weight_market_score_spec, data_usage_starts=data_usage_starts:
+                feature_builder.candidate(
+                    universe_payload=universe_payload,
+                    feature_payload=feature_payload,
+                    market_score_payload=market_score_payload,
+                    market_score_spec=market_score_spec,
+                    weight_market_score_spec=weight_market_score_spec,
+                    data_usage_starts=data_usage_starts,
+                )[0]
             )
-            source_cache_key = (
-                tuple(sorted(required_columns or {"trade_price"})),
-                tuple(required_feature_markets) if required_feature_markets is not None else (),
-                None if (uses_market_source or required_feature_markets is not None) else max_markets,
-            )
-            source_frames = source_frame_cache.get(source_cache_key)
-            if source_frames is None:
-                from lib.dataframes import read_wide_frames_from_cache
-
-                source_frames = read_wide_frames_from_cache(
-                    source_cache_dir,
-                    list(source_cache_key[0]),
-                    market_columns=required_feature_markets,
-                    max_markets=source_cache_key[2],
-                )
-                source_frame_cache[source_cache_key] = source_frames
-            feature_frames = build_feature_frames_from_cache(
-                source_cache_dir,
-                feature_specs,
-                market_columns=required_feature_markets,
-                output_market_columns=output_feature_markets,
-                max_markets=None if required_feature_markets is not None else max_markets,
-                tail_rows=tail_hours,
-                source_frames=source_frames,
-            )
-            if market_score_spec is not None:
-                feature_frames = dict(feature_frames)
-                feature_frames[market_score_spec.output_column] = build_market_score_frame(feature_frames, market_score_spec)
-            feature_cache[feature_key] = feature_frames
+            lazy_feature_sets[feature_key] = feature_frames
+        feature_frames.add_user()
 
         warning_cache_key = (
             tuple(required_feature_markets) if required_feature_markets is not None else (),
@@ -408,7 +423,7 @@ def _build_candidate_frames(
             required_feature_markets,
             feature_frames,
             warning_frame,
-        )
+        ) + ((preselection,) if preselection is not None else ())
 
     return candle_dir, source_cache_dir, primary_market, combinations, candidate_payloads
 
@@ -442,13 +457,11 @@ def _parse_anchor_offsets(raw_value: str, months: int) -> list[int]:
 
 def _resolve_timestamp_basis_markets(
     primary_market: str,
-    candidate_payloads: dict[
-        str,
-        tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str] | None, dict[str, pd.DataFrame], pd.DataFrame],
-    ],
+    candidate_payloads: dict[str, CandidateFramesPayload],
 ) -> list[str]:
     markets: set[str] = set()
-    for universe_payload, _, _, required_feature_markets, _, _ in candidate_payloads.values():
+    for payloads in candidate_payloads.values():
+        universe_payload, _, _, required_feature_markets, _, _ = payloads[:6]
         allowed_markets = universe_payload.get("allowed_markets") or []
         if allowed_markets:
             markets.update(str(market).upper() for market in allowed_markets)
@@ -471,27 +484,30 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     anchor_offsets = _parse_anchor_offsets(args.anchor_month_offsets, args.subperiod_months)
 
-    candle_dir, source_cache_dir, primary_market, _, candidate_payloads = _build_candidate_frames(config)
+    candle_dir, source_cache_dir, primary_market, _, candidate_payloads = _build_candidate_frames(
+        config, **({"preselection_out_dir": out_dir} if config.get("preselection") is not None else {}))
     timestamp_basis_markets = _resolve_timestamp_basis_markets(primary_market, candidate_payloads)
 
-    timestamp_price_frame = load_price_frame(
-        candle_dir,
-        "trade_price",
-        load_mode="wide",
-        source_cache_dir=source_cache_dir,
-        market_columns=timestamp_basis_markets,
-    )
-    common_timestamp_mask = timestamp_price_frame[timestamp_basis_markets].notna().all(axis=1)
-    timestamps = pd.DatetimeIndex(timestamp_price_frame.index[common_timestamp_mask])
-    if timestamps.empty:
+    if config.get("preselection") is not None:
+        # A future entrant's listing date cannot move the family period. Features
+        # keep the source timeline; equity histories establish the common overlap.
+        indexes = []
+        for p in candidate_payloads.values():
+            indexes.append(pd.DatetimeIndex(next(iter(materialize_candidate_features(p[4]).values())).index))
+            release_candidate_features(p[4])
+        timestamps = indexes[0]
+        for index in indexes[1:]:
+            timestamps = timestamps.intersection(index)
+    else:
         timestamp_price_frame = load_price_frame(
-            candle_dir,
-            "trade_price",
-            load_mode="wide",
-            source_cache_dir=source_cache_dir,
-            market_columns=None,
-        )
-        timestamps = _available_any_timestamps(timestamp_price_frame)
+            candle_dir, "trade_price", load_mode="wide", source_cache_dir=source_cache_dir,
+            market_columns=timestamp_basis_markets)
+        common_timestamp_mask = timestamp_price_frame[timestamp_basis_markets].notna().all(axis=1)
+        timestamps = pd.DatetimeIndex(timestamp_price_frame.index[common_timestamp_mask])
+        if timestamps.empty:
+            timestamp_price_frame = load_price_frame(
+                candle_dir, "trade_price", load_mode="wide", source_cache_dir=source_cache_dir, market_columns=None)
+            timestamps = _available_any_timestamps(timestamp_price_frame)
     timestamps = _trim_validation_timestamps(
         timestamps,
         [payloads[2] for payloads in candidate_payloads.values()],
@@ -504,13 +520,18 @@ def main() -> int:
     annualization: dict[str, float] = {}
     for candidate_label in sorted(candidate_payloads):
         payloads = candidate_payloads[candidate_label]
-        universe_payload, weight_payload, vectorbt_payload, required_markets, features, warnings = payloads
-        result = _run_v2_backtest_window(
-            candle_dir, source_cache_dir, features, warnings, required_markets,
-            universe_payload, weight_payload, vectorbt_payload, price_frame_cache,
-            config.get("max_markets"), eval_start=timestamps.min(),
-            eval_end=timestamps.max() + pd.Timedelta(nanoseconds=1), include_curves=True,
-        )
+        universe_payload, weight_payload, vectorbt_payload, required_markets, features, warnings = payloads[:6]
+        preselection = payloads[6] if config.get("preselection") is not None else None
+        try:
+            result = _run_v2_backtest_window(
+                candle_dir, source_cache_dir, materialize_candidate_features(features), warnings, required_markets,
+                universe_payload, weight_payload, vectorbt_payload, price_frame_cache,
+                config.get("max_markets"), eval_start=timestamps.min(),
+                eval_end=timestamps.max() + pd.Timedelta(nanoseconds=1), include_curves=True,
+                **({"preselection": preselection} if preselection is not None else {}),
+            )
+        finally:
+            release_candidate_features(features)
         try:
             candidate_returns[candidate_label] = _returns_from_result(result, args.score_metric)
             annualization[candidate_label] = float(result["Periods Per Year"])
@@ -699,6 +720,11 @@ def main() -> int:
         "top_is_best_count": int(split_frame["is_best_label"].value_counts().iloc[0]),
         "primary_market": primary_market,
     }
+    if config.get("preselection") is not None:
+        summary["timestamp_basis"] = "common_feature_timeline_then_equity_overlap"
+        summary["preselection"] = {label: {name: p[6][name]
+            for name in ("key", "manifest_path", "mask_path", "project")}
+            for label, p in candidate_payloads.items()}
 
     score_matrix.to_parquet(out_dir / "pbo_period_score_matrix.parquet")
     pd.DataFrame(period_rows).to_csv(out_dir / "pbo_period_scores_long.csv", index=False)

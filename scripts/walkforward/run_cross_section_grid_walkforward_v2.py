@@ -21,19 +21,36 @@ from lib.spec_io import (
     load_feature_specs_from_payload,
     load_market_score_spec,
     load_market_score_spec_from_payload,
+    load_strategy_sleeves_from_payload,
     load_universe_spec_from_payload,
     load_weight_spec_from_payload,
 )
-from lib.universe_v2 import build_universe_mask_v2
-from lib.vectorbt_adapter import VectorBTSpec, run_portfolio_from_target_weights
+from lib.universe_v2 import build_universe_mask_v2, holding_selection_start, validate_holding_selection_config
+from lib.vectorbt_adapter import VectorBTSpec
+from lib.backtest_engine_v2 import resolve_benchmark_curve_v2 as resolve_benchmark_curve
+from lib.backtest_engine_v2 import run_backtest_v2, apply_observed_universe_policy_v2, record_data_policy_audit_v2, funding_usage_starts_v2
+from lib.backtest_engine_v2 import BacktestResultV2, record_execution_availability_summary_v2
 from lib.weights_v2 import build_weight_frame_v2, is_change_only_weight_output, to_change_only_target_frame
 from scripts.run_cross_section_grid_v2 import (
     _grid_combinations,
     _passes_constraints,
+    _canonical_payload_key,
+    _prepare_grid_preselection,
+    _preselected_universe_payload,
+    _preselection_universe_frames,
+    _prune_inactive_target_columns,
     _read_warning_frame,
     _render_value,
+    _render_backtest_payload,
     _resolve_prune_inactive_price_columns,
     _resolve_source_cache_dir,
+    CandidateFeatureBuilder,
+    _build_strategy_sleeve_parts,
+    _config_uses_strategy_sleeves,
+    _needed_feature_names,
+    _strategy_sleeve_metadata,
+    _strategy_sleeve_request_frame,
+    _validate_strategy_sleeve_run,
 )
 from scripts.run_vectorbt import (
     benchmark_comparison_period_summary,
@@ -56,12 +73,37 @@ from scripts.run_vectorbt import (
     infer_timeframe,
     load_price_frame,
     periods_per_day_for_timeframe,
-    resolve_benchmark_curve,
     resolve_periods_per_year,
     strategy_performance_summary,
     timeframe_to_pandas_freq,
     trim_frames_to_first_weight,
 )
+
+
+class _CandidateFeatureCache:
+    """Candidate feature dicts kept until a budget is full, never evicted.
+
+    Folds visit candidates in the same order, so an evicting LRU smaller than
+    the candidate set would miss every time; filling once keeps the first
+    candidates that fit for every fold. The budget counts frames not shared
+    with other candidates. None means no limit.
+    """
+
+    def __init__(self, max_bytes: int | None) -> None:
+        self.max_bytes = max_bytes
+        self._items: dict = {}
+        self.size_bytes = 0
+
+    def get(self, key):
+        return self._items.get(key)
+
+    def put(self, key, frames: dict[str, pd.DataFrame], own_bytes: int) -> None:
+        if key in self._items:
+            return
+        if self.max_bytes is not None and self.size_bytes + own_bytes > self.max_bytes:
+            return
+        self._items[key] = frames
+        self.size_bytes += own_bytes
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,6 +123,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--ranking-metric",
         default="Annualized Information Ratio",
         help="IS metric used to choose each fold winner",
+    )
+    parser.add_argument(
+        "--candidate-feature-cache-mb",
+        type=float,
+        default=1024.0,
+        help=(
+            "Memory budget for candidate-specific feature frames reused across folds "
+            "(shared features are held once regardless). Candidates beyond the budget are "
+            "rebuilt in every fold; results do not change. strategy_sleeves configs keep "
+            "every candidate (the sleeve part cache keys on frame identity)."
+        ),
     )
     return parser
 
@@ -297,20 +350,77 @@ def _run_v2_backtest_window(
     *,
     trim_start_mode: str | None = None,
     include_curves: bool = False,
+    preselection: dict | None = None,
+    sleeve_part_cache: dict | None = None,
+    weight_frame_cache: dict | None = None,
 ) -> dict[str, Any]:
-    universe_spec = load_universe_spec_from_payload(universe_payload)
-    weight_spec = load_weight_spec_from_payload(weight_payload)
+    """weight_frame_cache must be scoped to one candidate (same feature frames,
+    warning frame, weight payload and preselection); it reuses the full-history
+    universe and weights between windows whose effective universe spec matches."""
+    sleeves = load_strategy_sleeves_from_payload(weight_payload)
+    sleeve_parts = None
+    if sleeves is not None:
+        _validate_strategy_sleeve_run(vectorbt_payload, preselection)
+        universe_spec = load_universe_spec_from_payload(universe_payload)
+        weight_spec = None
+        reference_index = next(iter(feature_frames.values())).index
+        aligned_warning_frame = warning_frame.reindex(index=reference_index)
+        eval_index = reference_index[(reference_index >= eval_start) & (reference_index < eval_end)]
+        # Same window rules as one strategy: observed policy on the window,
+        # holding books start empty at the window and ignore later exits.
+        sleeve_parts, data_exclusions = _build_strategy_sleeve_parts(
+            source_cache_dir, feature_frames, aligned_warning_frame, universe_payload, sleeves, vectorbt_payload,
+            policy_index=eval_index, holding_eval_start=eval_start, holding_eval_end=eval_end,
+            trim_start_mode=trim_start_mode, part_cache=sleeve_part_cache,
+            cache_owner=(feature_frames, warning_frame))
+        # The window book starts empty: markets with no nonzero request in the
+        # window cannot trade here, as in the pruned single-strategy path.
+        eval_weight_frame = _prune_inactive_target_columns(
+            _strategy_sleeve_request_frame(sleeve_parts, eval_start, eval_end))
+        weight_frame = eval_weight_frame
+        change_only_weights = False
+    else:
+        universe_spec = load_universe_spec_from_payload(universe_payload)
+        weight_spec = load_weight_spec_from_payload(weight_payload)
+        validate_holding_selection_config(universe_spec, weight_spec, vectorbt_payload)
 
-    reference_index = next(iter(feature_frames.values())).index
-    aligned_warning_frame = warning_frame.reindex(index=reference_index)
-    universe_result = build_universe_mask_v2(feature_frames, aligned_warning_frame, universe_spec)
-    weight_frame = build_weight_frame_v2(universe_result.selection_mask, weight_spec, feature_frames)
-    change_only_weights = is_change_only_weight_output(weight_spec)
-    if change_only_weights:
-        weight_frame = weight_frame.ffill().fillna(0.0)
-    eval_weight_frame = weight_frame.loc[(weight_frame.index >= eval_start) & (weight_frame.index < eval_end)]
-    if change_only_weights:
-        eval_weight_frame = to_change_only_target_frame(eval_weight_frame)
+        reference_index = next(iter(feature_frames.values())).index
+        aligned_warning_frame = warning_frame.reindex(index=reference_index)
+        eval_index = reference_index[(reference_index >= eval_start) & (reference_index < eval_end)]
+        universe_spec, data_exclusions = apply_observed_universe_policy_v2(
+            source_cache_dir, eval_index, next(iter(feature_frames.values())).columns, universe_spec, vectorbt_payload,
+            required_markets=[weight_spec.hedge.market] if weight_spec.hedge is not None else ())
+        change_only_weights = is_change_only_weight_output(weight_spec)
+        # Without holding, universe and weights use the full history and do not
+        # depend on the window, so windows with the same effective spec share them.
+        cache_key = None
+        if weight_frame_cache is not None and universe_spec.holding is None:
+            cache_key = (universe_spec, json.dumps(weight_payload, ensure_ascii=False, sort_keys=True, default=str))
+            try:
+                hash(cache_key)
+            except TypeError:
+                cache_key = None
+        weight_frame = weight_frame_cache.get(cache_key) if cache_key is not None else None
+        if weight_frame is None:
+            universe_frames = _preselection_universe_frames(feature_frames, universe_spec, preselection)
+            selection_start = None
+            if universe_spec.holding is not None:
+                selection_start = holding_selection_start(vectorbt_payload, eval_start=eval_start,
+                                                          trim_start_mode=trim_start_mode)
+                # The evaluation book starts empty. Future exit gaps outside this fold
+                # must not influence (or abort) its target generation.
+                universe_frames = {name: frame.loc[frame.index < eval_end] for name, frame in universe_frames.items()}
+            universe_result = build_universe_mask_v2(universe_frames, aligned_warning_frame, universe_spec,
+                                                   selection_start=selection_start)
+            weight_frame = build_weight_frame_v2(universe_result.selection_mask, weight_spec, feature_frames,
+                                               base_eligible_mask=universe_result.base_eligible_mask)
+            if change_only_weights:
+                weight_frame = weight_frame.ffill().fillna(0.0)
+            if cache_key is not None:
+                weight_frame_cache[cache_key] = weight_frame
+        eval_weight_frame = weight_frame.loc[(weight_frame.index >= eval_start) & (weight_frame.index < eval_end)]
+        if change_only_weights:
+            eval_weight_frame = to_change_only_target_frame(eval_weight_frame, scope=weight_spec.change_only_scope)
     if eval_weight_frame.empty or not bool(eval_weight_frame.notna().any(axis=1).any()):
         return {"status": "empty_weights"}
 
@@ -333,13 +443,22 @@ def _run_v2_backtest_window(
         vectorbt_payload,
         has_explicit_universe_markets=bool(universe_spec.allowed_markets),
     )
-    if prune_inactive_price_columns:
-        active_columns = eval_weight_frame.fillna(0.0).abs().sum(axis=0).gt(0.0)
-        required_price_market_set = {str(column).upper() for column in eval_weight_frame.columns[active_columns]}
+    if sleeve_parts is not None:
+        # Sleeves hold only their owned markets; prices follow that union.
+        required_price_market_set = {str(column).upper() for column in eval_weight_frame.columns}
+    elif prune_inactive_price_columns:
+        keep_markets = {weight_spec.hedge.market} if weight_spec.hedge is not None else set()
+        eval_weight_frame = _prune_inactive_target_columns(eval_weight_frame, keep_markets=keep_markets)
+        required_price_market_set = {str(column).upper() for column in eval_weight_frame.columns}
     elif universe_spec.allowed_markets:
         required_price_market_set = {str(market).upper() for market in universe_spec.allowed_markets}
     else:
         required_price_market_set = set()
+    if weight_spec is not None and weight_spec.hedge is not None:
+        if prune_inactive_price_columns:
+            required_price_market_set.add(weight_spec.hedge.market)
+        else:
+            required_price_market_set.update(eval_weight_frame.columns)
     if benchmark_uses_strategy_price_frame:
         required_price_market_set.add(benchmark_market)
     for market in (vectorbt_payload.get("benchmark_fixed_weights") or {}).keys():
@@ -414,9 +533,10 @@ def _run_v2_backtest_window(
             ]
         if change_only_weights:
             eval_weight_frame = weight_frame.loc[
-                (weight_frame.index >= effective_start) & (weight_frame.index < eval_end)
+                (weight_frame.index >= effective_start) & (weight_frame.index < eval_end),
+                eval_weight_frame.columns,
             ]
-            eval_weight_frame = to_change_only_target_frame(eval_weight_frame)
+            eval_weight_frame = to_change_only_target_frame(eval_weight_frame, scope=weight_spec.change_only_scope)
         trimmed_start_timestamp = effective_start
         if eval_price_frame.empty or eval_weight_frame.empty:
             return {"status": "empty_weights"}
@@ -427,16 +547,24 @@ def _run_v2_backtest_window(
             mode=effective_trim_start_mode,
         )
         if change_only_weights:
-            eval_weight_frame = to_change_only_target_frame(eval_weight_frame.ffill().fillna(0.0))
+            eval_weight_frame = to_change_only_target_frame(
+                eval_weight_frame.ffill().fillna(0.0), scope=weight_spec.change_only_scope)
         if eval_price_frame.empty or eval_weight_frame.empty:
             return {"status": "empty_weights"}
+    if sleeve_parts is not None and effective_trim_start_mode != "none":
+        # Rebuild from the trimmed first row so each sleeve's change_only output
+        # starts there, as the single-strategy path re-converts after trimming.
+        if eval_weight_frame.empty:
+            return {"status": "empty_weights"}
+        eval_weight_frame = _strategy_sleeve_request_frame(
+            sleeve_parts, eval_weight_frame.index.min(), eval_end).loc[:, eval_weight_frame.columns]
     if eval_benchmark_price_frame is not None and not eval_price_frame.empty:
         eval_benchmark_price_frame = eval_benchmark_price_frame.loc[
             (eval_benchmark_price_frame.index >= eval_price_frame.index.min())
             & (eval_benchmark_price_frame.index <= eval_price_frame.index.max())
         ]
 
-    timeframe = infer_timeframe(candle_dir, None)
+    timeframe = infer_timeframe(candle_dir, vectorbt_payload.get("timeframe"))
     periods_per_year = resolve_periods_per_year(
         timeframe,
         vectorbt_payload.get("periods_per_year"),
@@ -444,7 +572,7 @@ def _run_v2_backtest_window(
     periods_per_day = periods_per_day_for_timeframe(timeframe)
     pandas_freq = timeframe_to_pandas_freq(timeframe)
 
-    portfolio = run_portfolio_from_target_weights(
+    portfolio = run_backtest_v2(
         price_frame=eval_price_frame,
         target_weight_frame=eval_weight_frame,
         spec=VectorBTSpec(
@@ -454,13 +582,24 @@ def _run_v2_backtest_window(
             slippage=slippage,
             freq=pandas_freq,
         ),
+        payload=vectorbt_payload,
+        source_cache_dir=source_cache_dir,
+        timeframe=timeframe,
+        feature_frames=feature_frames,
     )
+    record_data_policy_audit_v2(portfolio, data_exclusions)
+    if sleeve_parts is not None and isinstance(portfolio, BacktestResultV2) and portfolio.metadata is not None:
+        portfolio.metadata["strategy_sleeves"] = _strategy_sleeve_metadata(sleeve_parts)
 
     summary = portfolio.stats(settings={"freq": pandas_freq})
+    summary = record_execution_availability_summary_v2(portfolio, summary)
     if "Benchmark Return [%]" in summary.index:
         summary = summary.rename(index={"Benchmark Return [%]": "VectorBT Benchmark Return [%]"})
     equity_curve = portfolio.value()
     benchmark_curve, benchmark_label = resolve_benchmark_curve(
+        source_cache_dir=source_cache_dir,
+        benchmark_source_cache_dir=benchmark_source_cache_dir,
+        benchmark_price_column=benchmark_price_column,
         price_frame=eval_price_frame,
         portfolio=portfolio,
         init_cash=init_cash,
@@ -551,6 +690,10 @@ def _run_v2_backtest_window(
     )
     result = {"status": "ok"}
     result.update(summary.to_dict())
+    if preselection is not None:
+        result.update({"Preselection Key": preselection["key"],
+                       "Preselection Manifest": preselection["manifest_path"],
+                       "Preselection Projection Enabled": preselection["project"]})
     if include_curves:
         result["_equity_curve"] = equity_curve
         result["_benchmark_curve"] = aligned_benchmark_curve
@@ -709,11 +852,14 @@ def main() -> None:
     combinations = [combo for combo in raw_combinations if _passes_constraints(combo, config.get("constraints", []))]
     if not combinations:
         raise SystemExit("No valid grid combinations after applying constraints")
+    preselection_plans = _prepare_grid_preselection(config, source_cache_dir, out_dir, combinations)
+    preselection_by_name = {} if preselection_plans is None else {
+        run_name_template.format(**combo): preselection_plans[_canonical_payload_key(combo)] for combo in combinations}
     combo_keys = sorted({key for combo in combinations for key in combo.keys()})
 
     first_context = dict(combinations[0])
     first_context["run_name"] = run_name_template.format(**first_context)
-    first_vectorbt_payload = _render_value(config.get("vectorbt_spec_template", {}), first_context)
+    first_vectorbt_payload = _render_backtest_payload(config, first_context)
     first_universe_payload = _render_value(config["universe_spec_template"], first_context)
     primary_market = None
     allowed_markets = first_universe_payload.get("allowed_markets", [])
@@ -729,7 +875,8 @@ def main() -> None:
         source_cache_dir=source_cache_dir,
         market_columns=[primary_market],
     )
-    timestamps = _available_timestamps(timestamp_price_frame, primary_market)
+    timestamps = (pd.DatetimeIndex(timestamp_price_frame.index) if preselection_plans is not None
+                  and not (tail_hours or 0) > 0 else _available_timestamps(timestamp_price_frame, primary_market))
     if timestamps.empty:
         timestamp_price_frame = load_price_frame(
             candle_dir,
@@ -745,7 +892,7 @@ def main() -> None:
     for combo in combinations:
         context = dict(combo)
         context["run_name"] = run_name_template.format(**context)
-        vectorbt_payloads.append(_render_value(config.get("vectorbt_spec_template", {}), context))
+        vectorbt_payloads.append(_render_backtest_payload(config, context))
     timestamps = _trim_validation_timestamps(timestamps, vectorbt_payloads)
     folds = _build_folds(
         timestamps,
@@ -757,122 +904,123 @@ def main() -> None:
     if not folds:
         raise SystemExit("No valid folds for requested walk-forward window")
 
-    feature_cache: dict[tuple[str, tuple[str, ...], str], dict[str, pd.DataFrame]] = {}
-    source_frame_cache: dict[tuple[tuple[str, ...], tuple[str, ...], int | None], dict[str, pd.DataFrame]] = {}
     price_frame_cache: dict[tuple[str, str, str, tuple[str, ...], int | None], pd.DataFrame] = {}
     warning_frame_cache: dict[tuple[tuple[str, ...], int | None], pd.DataFrame] = {}
+    # strategy_sleeves: full-history sleeve targets are reused across folds and
+    # deploy segments, and only features some candidate consumes are kept.
+    sleeve_part_cache: dict | None = {} if _config_uses_strategy_sleeves(config, combinations) else None
+    # Shared features are built once (grid rule) and only consumed outputs are
+    # kept; candidate-specific frames are cached within a memory budget.
+    feature_builder = CandidateFeatureBuilder(
+        config,
+        combinations,
+        source_cache_dir,
+        static_market_score_spec=static_market_score_spec,
+        preselection_plans=preselection_plans,
+        project_shared=True,
+    )
+    candidate_feature_cache = _CandidateFeatureCache(
+        None if sleeve_part_cache is not None else int(max(args.candidate_feature_cache_mb, 0.0) * 1024 * 1024))
+
+    def candidate_features(context, universe_payload, vectorbt_payload, market_score_payload,
+                           market_score_spec, weight_market_score_payload, weight_market_score_spec):
+        feature_payload = feature_builder.candidate_feature_payload(context)
+        required_feature_markets = feature_builder.candidate_required_markets(
+            universe_payload, feature_payload, market_score_spec)
+        data_usage_starts = funding_usage_starts_v2(source_cache_dir, vectorbt_payload)
+        output_feature_markets = _resolve_output_feature_markets(universe_payload)
+        key = (
+            tuple(sorted(data_usage_starts.items())),
+            json.dumps(feature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            tuple(required_feature_markets) if required_feature_markets is not None else (),
+            tuple(output_feature_markets) if output_feature_markets is not None else (),
+            json.dumps(market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if market_score_payload is not None
+            else (str(Path(str(market_score_spec_path)).resolve()) if market_score_spec_path else ""),
+            json.dumps(weight_market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if weight_market_score_payload is not None
+            else "",
+        )
+        frames = candidate_feature_cache.get(key)
+        if frames is None:
+            frames, built_markets = feature_builder.candidate(
+                universe_payload=universe_payload,
+                feature_payload=feature_payload,
+                market_score_payload=market_score_payload,
+                market_score_spec=market_score_spec,
+                weight_market_score_spec=weight_market_score_spec,
+                data_usage_starts=data_usage_starts,
+            )
+            if built_markets != required_feature_markets:
+                raise RuntimeError("candidate feature markets changed between planning and build")
+            shared_ids = (
+                {id(frame) for frame in feature_builder.shared_variant(data_usage_starts).values()}
+                if feature_builder.has_shared else set()
+            )
+            own_bytes = int(sum(
+                frame.memory_usage(index=True, deep=True).sum()
+                for frame in frames.values() if id(frame) not in shared_ids))
+            candidate_feature_cache.put(key, frames, own_bytes)
+        return frames, required_feature_markets
 
     fold_candidate_rows: list[dict[str, Any]] = []
     fold_winner_rows: list[dict[str, Any]] = []
 
-    for fold_idx, fold in enumerate(folds, start=1):
-        fold_label = f"fold_{fold_idx:02d}"
-        print(f"[{fold_idx}/{len(folds)}] {fold_label}")
-        candidate_rows_for_fold: list[dict[str, Any]] = []
+    # Candidates run outermost so one candidate's full-history universe and
+    # weights serve all of its fold windows; rows keep the fold-major order.
+    rows_by_fold: list[list[dict[str, Any]]] = [[] for _ in folds]
+    for combo_idx, combo in enumerate(combinations, start=1):
+        context = dict(combo)
+        run_name = run_name_template.format(**context)
+        context["run_name"] = run_name
+        universe_payload = _render_value(config["universe_spec_template"], context)
+        preselection = preselection_by_name[run_name] if preselection_plans is not None else None
+        universe_payload = _preselected_universe_payload(universe_payload, preselection)
+        weight_payload = _render_value(config["weight_spec_template"], context)
+        vectorbt_payload = _render_backtest_payload(config, context)
+        market_score_payload = (
+            _render_value(config["market_scores_spec_template"], context)
+            if config.get("market_scores_spec_template") is not None
+            else None
+        )
+        weight_market_score_payload = (
+            _render_value(config["weight_market_scores_spec_template"], context)
+            if config.get("weight_market_scores_spec_template") is not None
+            else None
+        )
+        market_score_spec = (
+            load_market_score_spec_from_payload(market_score_payload)
+            if market_score_payload is not None
+            else static_market_score_spec
+        )
+        weight_market_score_spec = (
+            load_market_score_spec_from_payload(weight_market_score_payload)
+            if weight_market_score_payload is not None
+            else None
+        )
+        feature_frames, required_feature_markets = candidate_features(
+            context, universe_payload, vectorbt_payload, market_score_payload,
+            market_score_spec, weight_market_score_payload, weight_market_score_spec)
 
-        for combo in combinations:
-            context = dict(combo)
-            run_name = run_name_template.format(**context)
-            context["run_name"] = run_name
-            universe_payload = _render_value(config["universe_spec_template"], context)
-            weight_payload = _render_value(config["weight_spec_template"], context)
-            vectorbt_payload = _render_value(config.get("vectorbt_spec_template", {}), context)
-            market_score_payload = (
-                _render_value(config["market_scores_spec_template"], context)
-                if config.get("market_scores_spec_template") is not None
-                else None
+        warning_cache_key = (
+            tuple(required_feature_markets) if required_feature_markets is not None else (),
+            None if required_feature_markets is not None else max_markets,
+            bool(load_universe_spec_from_payload(universe_payload).exclude_warnings),
+        )
+        warning_frame = warning_frame_cache.get(warning_cache_key)
+        if warning_frame is None:
+            warning_frame = _read_warning_frame(
+                source_cache_dir,
+                market_columns=required_feature_markets,
+                max_markets=None if required_feature_markets is not None else max_markets,
+                require_warning=warning_cache_key[2],
             )
-            weight_market_score_payload = (
-                _render_value(config["weight_market_scores_spec_template"], context)
-                if config.get("weight_market_scores_spec_template") is not None
-                else None
-            )
-            market_score_spec = (
-                load_market_score_spec_from_payload(market_score_payload)
-                if market_score_payload is not None
-                else static_market_score_spec
-            )
-            weight_market_score_spec = (
-                load_market_score_spec_from_payload(weight_market_score_payload)
-                if weight_market_score_payload is not None
-                else None
-            )
-            feature_payload = _render_feature_payload(config, context)
-            feature_specs = load_feature_specs_from_payload(feature_payload)
-            required_feature_markets = _resolve_required_feature_markets(
-                feature_specs,
-                universe_payload,
-                market_score_spec,
-            )
-            output_feature_markets = _resolve_output_feature_markets(universe_payload)
-            feature_key = (
-                json.dumps(feature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                tuple(required_feature_markets) if required_feature_markets is not None else (),
-                tuple(output_feature_markets) if output_feature_markets is not None else (),
-                json.dumps(market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if market_score_payload is not None
-                else (str(Path(str(market_score_spec_path)).resolve()) if market_score_spec_path else ""),
-                json.dumps(weight_market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if weight_market_score_payload is not None
-                else "",
-            )
-            feature_frames = feature_cache.get(feature_key)
-            if feature_frames is None:
-                required_columns, uses_market_source = required_source_columns_for_feature_specs(
-                    feature_specs,
-                    SUPPORTED_SOURCE_COLUMNS,
-                )
-                source_cache_key = (
-                    tuple(sorted(required_columns or {"trade_price"})),
-                    tuple(required_feature_markets) if required_feature_markets is not None else (),
-                    None if (uses_market_source or required_feature_markets is not None) else max_markets,
-                )
-                source_frames = source_frame_cache.get(source_cache_key)
-                if source_frames is None:
-                    from lib.dataframes import read_wide_frames_from_cache
+            warning_frame_cache[warning_cache_key] = warning_frame
+        print(f"[{combo_idx}/{len(combinations)}] {run_name}")
+        weight_frame_cache: dict = {}
 
-                    source_frames = read_wide_frames_from_cache(
-                        source_cache_dir,
-                        list(source_cache_key[0]),
-                        market_columns=required_feature_markets,
-                        max_markets=source_cache_key[2],
-                    )
-                    source_frame_cache[source_cache_key] = source_frames
-                feature_frames = build_feature_frames_from_cache(
-                    source_cache_dir,
-                    feature_specs,
-                    market_columns=required_feature_markets,
-                    output_market_columns=output_feature_markets,
-                    max_markets=None if required_feature_markets is not None else max_markets,
-                    tail_rows=tail_hours,
-                    source_frames=source_frames,
-                )
-                if market_score_spec is not None:
-                    feature_frames = dict(feature_frames)
-                    feature_frames[market_score_spec.output_column] = build_market_score_frame(feature_frames, market_score_spec)
-                if weight_market_score_spec is not None:
-                    feature_frames = dict(feature_frames)
-                    feature_frames[weight_market_score_spec.output_column] = build_market_score_frame(
-                        feature_frames,
-                        weight_market_score_spec,
-                    )
-                feature_cache[feature_key] = feature_frames
-
-            warning_cache_key = (
-                tuple(required_feature_markets) if required_feature_markets is not None else (),
-                None if required_feature_markets is not None else max_markets,
-                bool(load_universe_spec_from_payload(universe_payload).exclude_warnings),
-            )
-            warning_frame = warning_frame_cache.get(warning_cache_key)
-            if warning_frame is None:
-                warning_frame = _read_warning_frame(
-                    source_cache_dir,
-                    market_columns=required_feature_markets,
-                    max_markets=None if required_feature_markets is not None else max_markets,
-                    require_warning=warning_cache_key[2],
-                )
-                warning_frame_cache[warning_cache_key] = warning_frame
-
+        for fold_idx, fold in enumerate(folds, start=1):
+            fold_label = f"fold_{fold_idx:02d}"
             is_result = _run_v2_backtest_window(
                 candle_dir,
                 source_cache_dir,
@@ -886,6 +1034,9 @@ def main() -> None:
                 max_markets,
                 eval_start=fold["is_start"],
                 eval_end=fold["is_end"],
+                sleeve_part_cache=sleeve_part_cache,
+                weight_frame_cache=weight_frame_cache,
+                **({"preselection": preselection} if preselection is not None else {}),
             )
             oos_result = _run_v2_backtest_window(
                 candle_dir,
@@ -900,6 +1051,9 @@ def main() -> None:
                 max_markets,
                 eval_start=fold["oos_start"],
                 eval_end=fold["oos_end"],
+                sleeve_part_cache=sleeve_part_cache,
+                weight_frame_cache=weight_frame_cache,
+                **({"preselection": preselection} if preselection is not None else {}),
             )
 
             row = {
@@ -918,9 +1072,12 @@ def main() -> None:
                     if key == "status":
                         continue
                     row[f"{prefix}_{key}"] = value
-            fold_candidate_rows.append(row)
-            candidate_rows_for_fold.append(row)
+            rows_by_fold[fold_idx - 1].append(row)
+        del weight_frame_cache
 
+    for fold_idx, candidate_rows_for_fold in enumerate(rows_by_fold, start=1):
+        fold_label = f"fold_{fold_idx:02d}"
+        fold_candidate_rows.extend(candidate_rows_for_fold)
         ok_is_rows = [
             row
             for row in candidate_rows_for_fold
@@ -974,8 +1131,10 @@ def main() -> None:
             run_name = run_name_template.format(**context)
             context["run_name"] = run_name
             universe_payload = _render_value(config["universe_spec_template"], context)
+            preselection = preselection_by_name[str(segment["winner_label"])] if preselection_plans is not None else None
+            universe_payload = _preselected_universe_payload(universe_payload, preselection)
             weight_payload = _render_value(config["weight_spec_template"], context)
-            vectorbt_payload = _render_value(config.get("vectorbt_spec_template", {}), context)
+            vectorbt_payload = _render_backtest_payload(config, context)
             market_score_payload = (
                 _render_value(config["market_scores_spec_template"], context)
                 if config.get("market_scores_spec_template") is not None
@@ -996,69 +1155,9 @@ def main() -> None:
                 if weight_market_score_payload is not None
                 else None
             )
-            feature_payload = _render_feature_payload(config, context)
-            feature_specs = load_feature_specs_from_payload(feature_payload)
-            required_feature_markets = _resolve_required_feature_markets(
-                feature_specs,
-                universe_payload,
-                market_score_spec,
-            )
-            output_feature_markets = _resolve_output_feature_markets(universe_payload)
-            feature_key = (
-                json.dumps(feature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                tuple(required_feature_markets) if required_feature_markets is not None else (),
-                tuple(output_feature_markets) if output_feature_markets is not None else (),
-                json.dumps(market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if market_score_payload is not None
-                else (str(Path(str(market_score_spec_path)).resolve()) if market_score_spec_path else ""),
-                json.dumps(weight_market_score_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                if weight_market_score_payload is not None
-                else "",
-            )
-            feature_frames = feature_cache.get(feature_key)
-            if feature_frames is None:
-                required_columns, uses_market_source = required_source_columns_for_feature_specs(
-                    feature_specs,
-                    SUPPORTED_SOURCE_COLUMNS,
-                )
-                source_cache_key = (
-                    tuple(sorted(required_columns or {"trade_price"})),
-                    tuple(required_feature_markets) if required_feature_markets is not None else (),
-                    None if (uses_market_source or required_feature_markets is not None) else max_markets,
-                )
-                source_frames = source_frame_cache.get(source_cache_key)
-                if source_frames is None:
-                    from lib.dataframes import read_wide_frames_from_cache
-
-                    source_frames = read_wide_frames_from_cache(
-                        source_cache_dir,
-                        list(source_cache_key[0]),
-                        market_columns=required_feature_markets,
-                        max_markets=source_cache_key[2],
-                    )
-                    source_frame_cache[source_cache_key] = source_frames
-                feature_frames = build_feature_frames_from_cache(
-                    source_cache_dir,
-                    feature_specs,
-                    market_columns=required_feature_markets,
-                    output_market_columns=output_feature_markets,
-                    max_markets=None if required_feature_markets is not None else max_markets,
-                    tail_rows=tail_hours,
-                    source_frames=source_frames,
-                )
-                if market_score_spec is not None:
-                    feature_frames = dict(feature_frames)
-                    feature_frames[market_score_spec.output_column] = build_market_score_frame(
-                        feature_frames,
-                        market_score_spec,
-                    )
-                if weight_market_score_spec is not None:
-                    feature_frames = dict(feature_frames)
-                    feature_frames[weight_market_score_spec.output_column] = build_market_score_frame(
-                        feature_frames,
-                        weight_market_score_spec,
-                    )
-                feature_cache[feature_key] = feature_frames
+            feature_frames, required_feature_markets = candidate_features(
+                context, universe_payload, vectorbt_payload, market_score_payload,
+                market_score_spec, weight_market_score_payload, weight_market_score_spec)
 
             warning_cache_key = (
                 tuple(required_feature_markets) if required_feature_markets is not None else (),
@@ -1090,6 +1189,8 @@ def main() -> None:
                 eval_end=pd.Timestamp(segment["deploy_end"]),
                 trim_start_mode="none",
                 include_curves=True,
+                sleeve_part_cache=sleeve_part_cache,
+                **({"preselection": preselection} if preselection is not None else {}),
             )
             if segment_result.get("status") != "ok":
                 continue
@@ -1105,7 +1206,7 @@ def main() -> None:
                 "portfolio_group_rebalance": "PORTFOLIO_GROUP_REBALANCE",
             }.get(benchmark_mode, benchmark_market)
             periods_per_year = resolve_periods_per_year(
-                infer_timeframe(candle_dir, None),
+                infer_timeframe(candle_dir, first_vectorbt_payload.get("timeframe")),
                 first_vectorbt_payload.get("periods_per_year"),
             )
             stitched_equity_curve = _stitch_curves(

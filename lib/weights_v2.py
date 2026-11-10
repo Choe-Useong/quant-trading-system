@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 
-from lib.specs import DefensiveSleeveSpec, PortfolioVolTargetSpec, WeightSpec
+from lib.specs import DefensiveSleeveSpec, FilterStageSpec, PortfolioVolTargetSpec, WeightSpec
+from lib.dataframes import CACHE_ELIGIBILITY_FRAME
+
+
+# Tolerance for "same value in every market column" checks. Broadcast features
+# computed per column (e.g. market:BTC rolling statistics with per-market start
+# points) differ by floating-point error of about 1e-12 relative.
+BROADCAST_ATOL = 1e-12
+BROADCAST_RTOL = 1e-9
 
 
 def _rebalance_mask(index: pd.Index, frequency: str) -> pd.Series:
@@ -15,7 +24,21 @@ def _rebalance_mask(index: pd.Index, frequency: str) -> pd.Series:
     timestamps = pd.to_datetime(index)
     if frequency == "every_bar":
         return pd.Series(True, index=index)
-    if frequency == "daily":
+    nday = re.fullmatch(r"([1-9][0-9]*)d(?:\+([1-9][0-9]*))?", frequency)
+    if nday:
+        # Global UTC calendar buckets keep the phase independent of the input
+        # start (including WF slices). A Monday anchor also makes 7d == weekly.
+        # "Nd+K" shifts bucket starts by K days (7d+3: Thursdays 00 UTC).
+        days = int(nday.group(1))
+        offset = int(nday.group(2) or 0)
+        if offset >= days:
+            raise ValueError(f"N-day rebalance offset must be 1..N-1: {frequency}")
+        utc = timestamps.tz_localize("UTC") if timestamps.tz is None else timestamps.tz_convert("UTC")
+        if utc.hasnans:
+            raise ValueError("N-day rebalance timestamps must not contain NaT")
+        elapsed_days = (utc.normalize() - pd.Timestamp("1970-01-05", tz="UTC")).days
+        keys = pd.Index((elapsed_days - offset) // days)
+    elif frequency == "daily":
         keys = pd.Index([ts.strftime("%Y-%m-%d") for ts in timestamps], dtype="object")
     elif frequency == "weekly":
         keys = pd.Index([f"{ts.isocalendar().year}-{ts.isocalendar().week}" for ts in timestamps], dtype="object")
@@ -42,8 +65,21 @@ def is_change_only_weight_output(spec: WeightSpec) -> bool:
     return is_change_only_rebalance_frequency(spec.rebalance_frequency) or _is_change_only_output_mode(spec.output_mode)
 
 
-def to_change_only_target_frame(target: pd.DataFrame) -> pd.DataFrame:
+def to_change_only_target_frame(target: pd.DataFrame, *, scope: str = "portfolio") -> pd.DataFrame:
+    """Emit requests from dense targets; callers resolve hold NaNs before slicing.
+
+    Portfolio scope preserves historical whole-row requests. Asset scope emits
+    only changed cells, including explicit zero exits. Every first-row target
+    is emitted so a fresh simulation can establish its initial positions.
+    """
+    if scope not in ("portfolio", "asset"):
+        raise ValueError("change_only_scope must be 'portfolio' or 'asset'")
     dense = target.fillna(0.0)
+    if scope == "asset":
+        changed = dense.ne(dense.shift(1))
+        if len(changed.index):
+            changed.iloc[0, :] = True
+        return dense.where(changed)
     change_mask = dense.ne(dense.shift(1)).any(axis=1)
     if not change_mask.empty:
         change_mask.iloc[0] = True
@@ -51,6 +87,45 @@ def to_change_only_target_frame(target: pd.DataFrame) -> pd.DataFrame:
     sparse = pd.DataFrame(float("nan"), index=target.index, columns=target.columns)
     sparse.loc[change_mask, :] = dense.loc[change_mask, :]
     return sparse
+
+
+def combine_strategy_sleeve_frames(frames: list[pd.DataFrame], capitals: list[float]) -> pd.DataFrame:
+    """Combine final per-sleeve request frames into one account request frame.
+
+    Inputs are execution-ready frames (NaN = hold, value = account-equity target)
+    on one common index. A market is requested at t when any sleeve holding that
+    column requests it; the request is sum(capital * latest sleeve target), with
+    sleeves before their first request contributing zero. Other cells stay NaN.
+    Disjoint markets therefore reproduce the scaled sleeve frames exactly. On a
+    shared market, a sleeve that does not request at t contributes its latest
+    target weight, not its price-drifted holding.
+    """
+    if not frames or len(frames) != len(capitals):
+        raise ValueError("strategy sleeves require one capital per non-empty frame list")
+    index = frames[0].index
+    if not index.is_unique or not index.is_monotonic_increasing:
+        raise ValueError("strategy sleeve frames require unique chronological timestamps")
+    columns: list = []
+    for frame in frames:
+        if not frame.index.equals(index):
+            raise ValueError("strategy sleeve frames must share the same timestamps")
+        if not frame.columns.is_unique:
+            raise ValueError("strategy sleeve frames require unique markets")
+        columns.extend(column for column in frame.columns if column not in columns)
+    values = np.zeros((len(index), len(columns)))
+    requested = np.zeros((len(index), len(columns)), dtype=bool)
+    for frame, capital in zip(frames, capitals):
+        capital = float(capital)
+        if not np.isfinite(capital) or capital < 0:
+            raise ValueError("strategy sleeve capital must be finite and non-negative")
+        sleeve = frame.astype(float)
+        cells = sleeve.to_numpy()
+        if np.isinf(cells).any():
+            raise ValueError("strategy sleeve targets must be finite or NaN")
+        positions = [columns.index(column) for column in sleeve.columns]
+        requested[:, positions] |= ~np.isnan(cells)
+        values[:, positions] += capital * sleeve.ffill().fillna(0.0).to_numpy()
+    return pd.DataFrame(np.where(requested, values, np.nan), index=index, columns=pd.Index(columns))
 
 
 def _normalize_frequency(value: str) -> str:
@@ -61,18 +136,22 @@ def _exposure_scale_series(
     selection_mask: pd.DataFrame,
     spec: WeightSpec,
     feature_frames: dict[str, pd.DataFrame] | None,
+    *,
+    side: str | None = None,
 ) -> pd.Series | None:
-    feature_name = spec.gross_exposure_feature
+    prefix = "gross" if side is None else side
+    field = f"{prefix}_exposure_feature"
+    feature_name = getattr(spec, field)
     if not feature_name:
         return None
     if feature_frames is None or feature_name not in feature_frames:
-        raise ValueError(f"Missing gross exposure feature for weights_v2: {feature_name}")
+        raise ValueError(f"Missing {prefix} exposure feature for weights_v2: {feature_name}")
 
     frame = feature_frames[feature_name].copy()
     frame = frame.reindex(selection_mask.index)
 
     if frame.shape[1] == 0:
-        raise ValueError(f"Gross exposure feature has no columns for weights_v2: {feature_name}")
+        raise ValueError(f"{prefix.capitalize()} exposure feature has no columns for weights_v2: {feature_name}")
 
     if frame.shape[1] == 1:
         scalar = frame.iloc[:, 0].astype(float)
@@ -80,20 +159,28 @@ def _exposure_scale_series(
         values = frame.astype(float)
         row_min = values.min(axis=1, skipna=True)
         row_max = values.max(axis=1, skipna=True)
-        inconsistent = row_min.notna() & row_max.notna() & ~np.isclose(row_min, row_max, atol=1e-12, rtol=0.0)
+        inconsistent = row_min.notna() & row_max.notna() & ~np.isclose(row_max, row_min, atol=BROADCAST_ATOL, rtol=BROADCAST_RTOL)
         if bool(inconsistent.any()):
             first_bad = str(inconsistent[inconsistent].index[0])
             raise ValueError(
-                f"gross_exposure_feature must be scalar/broadcast across markets for weights_v2: "
+                f"{field} must be scalar/broadcast across markets for weights_v2: "
                 f"{feature_name} at {first_bad}"
             )
         scalar = values.bfill(axis=1).iloc[:, 0]
 
-    lag = int(spec.gross_exposure_lag)
+    lag = int(getattr(spec, f"{prefix}_exposure_lag"))
     if lag > 0:
         scalar = scalar.shift(lag)
     elif lag < 0:
-        raise ValueError("gross_exposure_lag must be non-negative for weights_v2")
+        raise ValueError(f"{prefix}_exposure_lag must be non-negative for weights_v2")
+
+    if side is not None:
+        # Side features are multipliers, not target exposures. Missing history
+        # is neutral; never borrow a later observation to fill the prefix.
+        values = frame.to_numpy(dtype=float, copy=False)
+        if np.isinf(values).any() or (values < 0).any():
+            raise ValueError(f"{field} must contain finite non-negative multipliers or NaN")
+        return scalar.fillna(1.0)
 
     clip_min = float(spec.gross_exposure_clip_min)
     clip_max = float(spec.gross_exposure_clip_max)
@@ -124,7 +211,7 @@ def _defensive_risk_on_series(
         values = frame.astype(float)
         row_min = values.min(axis=1, skipna=True)
         row_max = values.max(axis=1, skipna=True)
-        inconsistent = row_min.notna() & row_max.notna() & ~np.isclose(row_min, row_max, atol=1e-12, rtol=0.0)
+        inconsistent = row_min.notna() & row_max.notna() & ~np.isclose(row_max, row_min, atol=BROADCAST_ATOL, rtol=BROADCAST_RTOL)
         if bool(inconsistent.any()):
             first_bad = str(inconsistent[inconsistent].index[0])
             raise ValueError(
@@ -266,6 +353,106 @@ def _feature_value_target_frame(
         rebalance_target = rebalance_target.mul(exposure_scale.loc[rebalance_index], axis=0)
     target.loc[rebalance_index, :] = rebalance_target.fillna(0.0)
     return target
+
+
+def _long_short_signals(selection, spec, frames, base_eligible_mask):
+    """Resolve optional rank conditions with the universe's original population."""
+    for name in ("long_exposure", "short_exposure"):
+        value = getattr(spec, name)
+        if (isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating))
+                or not np.isfinite(value) or value < 0):
+            raise ValueError(f"long_short_equal {name} must be finite and non-negative")
+    if spec.gross_exposure != 1.0:
+        raise ValueError("long_short_equal uses long_exposure/short_exposure; gross_exposure must be 1")
+    filters = (spec.long_filter, spec.short_filter)
+    if all(item is None for item in filters):
+        if not spec.position_score_feature:
+            raise ValueError("long_short_equal requires position_score_feature or long_filter/short_filter")
+        return spec, frames
+    if any(item is None for item in filters) or spec.position_score_feature:
+        raise ValueError("long_short_equal requires both filters and no position_score_feature")
+    if spec.position_score_lag != 0:
+        raise ValueError("long_short_equal rank filters use their own lag; position_score_lag must be 0")
+    from lib.universe_v2 import _apply_filter_stage
+    if frames is None:
+        raise ValueError("long_short_equal rank filters require feature frames")
+    base = (None if base_eligible_mask is None else
+            base_eligible_mask.reindex(index=selection.index, columns=selection.columns).eq(True))
+    usage = frames.get(CACHE_ELIGIBILITY_FRAME)
+    candidates = selection.fillna(False).astype(bool)
+    if usage is not None:
+        eligible = usage.reindex(index=selection.index, columns=selection.columns).eq(True)
+        candidates = candidates & eligible
+        if base is not None:
+            base = base & eligible
+    masks = []
+    rank_cache = {}
+    aligned_frames = {}
+    for side in filters:
+        stage = side if isinstance(side, FilterStageSpec) else FilterStageSpec(mode="and", filters=(side,))
+        if stage.mode not in ("and", "sequential") or not stage.filters:
+            raise ValueError("long_short_equal side groups require mode='and' or 'sequential' and non-empty filters")
+        for item in stage.filters:
+            if type(item.lag) is not int or item.lag < 0:
+                raise ValueError("long_short_equal filter lag must be a non-negative integer")
+            if item.mode == "quantile":
+                if (type(item.quantiles) is not int or item.quantiles <= 0 or not item.bucket_values
+                        or any(type(b) is not int or not 1 <= b <= item.quantiles for b in item.bucket_values)):
+                    raise ValueError("long_short_equal filter requires valid quantiles/bucket_values")
+            elif item.mode == "top_n":
+                if type(item.top_n) is not int or item.top_n <= 0:
+                    raise ValueError("long_short_equal filter top_n must be a positive integer")
+            else:
+                raise ValueError("long_short_equal filter mode must be top_n or quantile")
+            if item.feature_column not in frames:
+                raise ValueError(f"Missing long_short_equal filter feature: {item.feature_column}")
+            if (item.scope or "filtered").lower() in {"global", "base"} and base is None:
+                raise ValueError("long_short_equal global filters require base_eligible_mask from the universe")
+            if item.feature_column not in aligned_frames:
+                values = frames[item.feature_column]
+                if not values.index.equals(selection.index) or not values.columns.equals(selection.columns):
+                    values = values.reindex(index=selection.index, columns=selection.columns)
+                if np.isinf(values.to_numpy(dtype=float)).any():
+                    raise ValueError("long_short_equal filter feature must not contain infinity")
+                aligned_frames[item.feature_column] = values
+        mask, _ = _apply_filter_stage(
+            candidates, ("selection",), candidates if base is None else base, ("base",),
+            aligned_frames, stage, rank_cache=rank_cache, rank_cache_namespace=("long_short",))
+        masks.append(mask)
+    if (masks[0] & masks[1]).any().any():
+        raise ValueError("long_short_equal long and short conditions overlap")
+    signals = masks[0].astype(float) - masks[1].astype(float)
+    resolved_frames = dict(frames)
+    name = "__long_short_equal_signal__"
+    resolved_frames[name] = signals
+    return replace(spec, position_score_feature=name, position_score_lag=0,
+                   long_filter=None, short_filter=None), resolved_frames
+
+
+def _long_short_equal_target_frame(selection, spec, scores, scale, rebalance_dates, frames=None):
+    if scores is None:
+        raise ValueError("long_short_equal requires position scores")
+    if np.isinf(scores.to_numpy(dtype=float)).any():
+        raise ValueError("long_short_equal position scores must not contain infinity")
+    index = selection.index[rebalance_dates]
+    selected = selection.loc[index].fillna(False).astype(bool)
+    values = scores.loc[index]
+    longs = selected & values.gt(0)
+    shorts = selected & values.lt(0)
+    long_target = longs.astype(float).mul(float(spec.long_exposure)).div(
+        longs.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    short_target = shorts.astype(float).mul(float(spec.short_exposure)).div(
+        shorts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    for side, target_side in (("long", long_target), ("short", short_target)):
+        side_scale = _exposure_scale_series(selection, spec, frames, side=side)
+        if side_scale is not None:
+            target_side *= side_scale.loc[index].to_numpy()[:, None]
+    target = long_target - short_target
+    if scale is not None:
+        target = target.mul(scale.loc[index], axis=0)
+    result = pd.DataFrame(np.nan, index=selection.index, columns=selection.columns)
+    result.loc[index] = target
+    return result
 
 
 def _listed_mask_frame(
@@ -900,19 +1087,125 @@ def _build_portfolio_vol_target_frame(
     if feature_frames is None or feature_name not in feature_frames:
         raise ValueError(f"Missing portfolio volatility price feature for weights_v2: {feature_name}")
 
-    prices = feature_frames[feature_name].reindex(index=selection_mask.index, columns=selection_mask.columns)
+    prices = feature_frames[feature_name].reindex(index=selection_mask.index)
     if prices.index.has_duplicates:
         raise ValueError("portfolio_vol_target price feature index must be unique")
 
     base_spec = replace(spec, portfolio_vol_target=None, output_mode="")
     base_target = build_weight_frame_v2(selection_mask, base_spec, feature_frames).ffill().fillna(0.0)
+    if spec.hedge is not None and spec.hedge.market not in prices.columns:
+        raise ValueError("portfolio_vol_target price feature must include the hedge market")
+    prices = prices.reindex(columns=base_target.columns)
     if not np.isfinite(base_target.to_numpy(dtype=float)).all():
         raise ValueError("portfolio_vol_target base weights must be finite")
     multipliers = _portfolio_vol_multiplier_series(base_target, prices, target_spec)
     return base_target.mul(multipliers, axis=0).fillna(0.0)
 
 
+def _build_hedged_target_frame(
+    selection_mask: pd.DataFrame,
+    spec: WeightSpec,
+    feature_frames: dict[str, pd.DataFrame] | None,
+) -> pd.DataFrame:
+    hedge = spec.hedge
+    market = str(hedge.market).strip().upper()
+    if not market or market != hedge.market:
+        raise ValueError("hedge market must be a non-empty uppercase market identifier")
+    if hedge.mode not in {"beta", "notional"}:
+        raise ValueError("hedge mode must be 'beta' or 'notional'")
+    if not np.isfinite(hedge.ratio) or hedge.ratio < 0.0:
+        raise ValueError("hedge ratio must be finite and non-negative")
+    if (isinstance(hedge.beta_lag, bool) or not isinstance(hedge.beta_lag, (int, float, np.integer, np.floating))
+            or not np.isfinite(hedge.beta_lag) or int(hedge.beta_lag) != hedge.beta_lag or hedge.beta_lag < 0):
+        raise ValueError("hedge beta_lag must be a non-negative integer")
+    if spec.defensive_sleeve is not None:
+        raise ValueError("hedge and defensive_sleeve cannot be combined")
+    if market in selection_mask and bool(selection_mask[market].fillna(False).any()):
+        raise ValueError(f"Hedge market must be excluded from the strategy universe: {market}")
+
+    # Let the existing allocation logic set actual primary target weights first.
+    # Apply a common exposure multiplier only after adding the hedge leg.
+    base_spec = replace(spec, hedge=None, gross_exposure_feature=None, output_mode="")
+    # The public wrapper already filtered selection by cache eligibility. Read
+    # the allocation before its final forced zeros: those zeros also appear on
+    # non-rebalance rows and must not be mistaken for primary order requests.
+    # The wrapper still applies the same eligibility mask to the combined result.
+    target = _build_weight_frame_v2(selection_mask, base_spec, feature_frames)
+    if not target.index.is_unique or not target.columns.is_unique:
+        raise ValueError("hedge requires unique timestamps and columns")
+    requested = target.notna().any(axis=1)
+    primary = target.drop(columns=market, errors="ignore")
+    weights = primary.loc[requested].to_numpy(dtype=float)
+    if not np.isfinite(weights).all():
+        raise ValueError("hedge requires complete finite target rows at rebalance timestamps")
+    if hedge.mode == "beta":
+        if not hedge.beta_feature or feature_frames is None or hedge.beta_feature not in feature_frames:
+            raise ValueError(f"Missing hedge beta feature: {hedge.beta_feature}")
+        beta_frame = feature_frames[hedge.beta_feature]
+        if not beta_frame.index.is_unique or not beta_frame.columns.is_unique:
+            raise ValueError("hedge beta feature must have unique timestamps and columns")
+        # Shift on the complete source timeline before selecting rebalance rows.
+        betas = beta_frame.reindex(index=target.index, columns=primary.columns).shift(int(hedge.beta_lag))
+        beta_values = betas.loc[requested].to_numpy(dtype=float)
+        active = (weights != 0.0) & (hedge.ratio != 0.0)
+        invalid = active & ~np.isfinite(beta_values)
+        if invalid.any():
+            row, column = np.argwhere(invalid)[0]
+            raise ValueError(
+                f"Missing/non-finite hedge beta for active position: {primary.columns[column]} "
+                f"at {target.index[requested][row]}; filter beta warmup/missing observations before entry"
+            )
+        exposure = np.sum(weights * np.where(active, beta_values, 0.0), axis=1)
+    else:
+        exposure = weights.sum(axis=1)
+    hedge_weights = -exposure * hedge.ratio
+    if not np.isfinite(hedge_weights).all():
+        raise ValueError("Non-finite calculated hedge weights")
+    result = target.copy()
+    result[market] = np.nan
+    result.loc[requested, market] = hedge_weights
+    scale = _exposure_scale_series(selection_mask, spec, feature_frames)
+    if scale is not None:
+        result = result.mul(scale, axis=0)
+    return result
+
+
 def build_weight_frame_v2(
+    selection_mask: pd.DataFrame,
+    spec: WeightSpec,
+    feature_frames: dict[str, pd.DataFrame] | None = None,
+    *,
+    base_eligible_mask: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if spec.change_only_scope not in ("portfolio", "asset"):
+        raise ValueError("change_only_scope must be 'portfolio' or 'asset'")
+    for side in ("long", "short"):
+        feature = getattr(spec, f"{side}_exposure_feature")
+        lag = getattr(spec, f"{side}_exposure_lag")
+        if type(lag) is not int or lag < 0:
+            raise ValueError(f"{side}_exposure_lag must be a non-negative integer")
+        if feature is not None and (not isinstance(feature, str) or not feature.strip()):
+            raise ValueError(f"{side}_exposure_feature must be a non-empty feature name")
+        if lag and feature is None:
+            raise ValueError(f"{side}_exposure_lag requires {side}_exposure_feature")
+        if feature is not None and spec.weighting != "long_short_equal":
+            raise ValueError("Side exposure features require weighting='long_short_equal'")
+    if spec.weighting == "long_short_equal":
+        spec, feature_frames = _long_short_signals(selection_mask, spec, feature_frames, base_eligible_mask)
+    usage = feature_frames.get(CACHE_ELIGIBILITY_FRAME) if feature_frames is not None else None
+    if usage is None:
+        return _build_weight_frame_v2(selection_mask, spec, feature_frames)
+    eligible = usage.reindex(index=selection_mask.index, columns=selection_mask.columns).eq(True)
+    target = _build_weight_frame_v2(selection_mask & eligible, spec, feature_frames)
+    target_eligible = usage.reindex(index=target.index, columns=target.columns).eq(True)
+    if spec.hedge is not None:
+        market = spec.hedge.market
+        if market in target and (target[market].fillna(0).ne(0) & ~target_eligible[market]).any():
+            raise ValueError(f"Hedge market is outside cache data usage history: {market}")
+    return target.where(target_eligible, 0.0)
+
+
+def _build_weight_frame_v2(
     selection_mask: pd.DataFrame,
     spec: WeightSpec,
     feature_frames: dict[str, pd.DataFrame] | None = None,
@@ -921,7 +1214,7 @@ def build_weight_frame_v2(
     if is_change_only_rebalance_frequency(rebalance_frequency):
         dense_spec = replace(spec, rebalance_frequency="every_bar", gross_exposure_update_frequency="", output_mode="")
         dense_target = build_weight_frame_v2(selection_mask, dense_spec, feature_frames)
-        return to_change_only_target_frame(dense_target)
+        return to_change_only_target_frame(dense_target, scope=spec.change_only_scope)
 
     output_mode = _normalize_frequency(spec.output_mode)
     if output_mode not in {"", "dense", "change_only"}:
@@ -930,24 +1223,33 @@ def build_weight_frame_v2(
     if spec.portfolio_vol_target is not None:
         dense_target = _build_portfolio_vol_target_frame(selection_mask, spec, feature_frames)
         if output_mode == "change_only":
-            return to_change_only_target_frame(dense_target)
+            return to_change_only_target_frame(dense_target, scope=spec.change_only_scope)
         return dense_target
 
     if spec.gross_exposure_update_frequency:
         dense_target = _build_exposure_overlay_target_frame(selection_mask, spec, feature_frames)
         if output_mode == "change_only":
-            return to_change_only_target_frame(dense_target)
+            return to_change_only_target_frame(dense_target, scope=spec.change_only_scope)
         return dense_target
 
     if output_mode == "change_only":
         base_spec = replace(spec, output_mode="")
         dense_target = build_weight_frame_v2(selection_mask, base_spec, feature_frames).ffill().fillna(0.0)
-        return to_change_only_target_frame(dense_target)
+        return to_change_only_target_frame(dense_target, scope=spec.change_only_scope)
+
+    if spec.hedge is not None:
+        return _build_hedged_target_frame(selection_mask, spec, feature_frames)
 
     rebalance_dates = _rebalance_mask(selection_mask.index, rebalance_frequency)
     selected = selection_mask.fillna(False).astype(bool)
     exposure_scale = _exposure_scale_series(selection_mask, spec, feature_frames)
     position_scores = _position_score_frame(selection_mask, spec, feature_frames)
+
+    if spec.weighting == "long_short_equal":
+        return _apply_defensive_sleeve_target_frame(
+            _long_short_equal_target_frame(selection_mask, spec, position_scores, exposure_scale, rebalance_dates,
+                                           feature_frames),
+            spec, feature_frames)
 
     if spec.weighting == "equal":
         gross_exposure = float(spec.gross_exposure)
@@ -1064,7 +1366,7 @@ def build_weight_frame_v2(
         )
 
     raise ValueError(
-        "frame_v2 currently supports equal, fixed, rank_fixed, listed_fixed, feature_value, hrp, "
+        "frame_v2 currently supports equal, long_short_equal, fixed, rank_fixed, listed_fixed, feature_value, hrp, "
         "and cluster_equal weighting only"
     )
 

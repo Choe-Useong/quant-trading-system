@@ -9,6 +9,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -671,33 +672,47 @@ def compute_drawdown_recovery_stats(curve: pd.Series) -> pd.Series:
         )
 
     drawdown = (series / series.cummax()) - 1.0
-    running_max = float(series.iloc[0])
-    running_max_time = pd.Timestamp(series.index[0])
-    in_drawdown = False
-    completed_duration_bars: list[int] = []
+    if (
+        isinstance(series.index, pd.DatetimeIndex)
+        and series.index.is_monotonic_increasing
+        and series.index.is_unique
+        and series.dtype.kind != "c"
+    ):
+        # Durations count observed bars, so gaps in calendar time need no slicing.
+        # Equal highs reset the peak to their latest occurrence, as in the loop.
+        values = series.to_numpy(dtype=float)
+        peak_positions = np.flatnonzero(values >= np.maximum.accumulate(values))
+        durations = np.diff(peak_positions)
+        completed_duration_bars = durations[durations > 1].tolist()
+        current_drawdown_bars = int(len(series) - 1 - peak_positions[-1])
+    else:
+        # Preserve label-based slicing for duplicate or unordered timestamps.
+        running_max = float(series.iloc[0])
+        running_max_time = pd.Timestamp(series.index[0])
+        in_drawdown = False
+        completed_duration_bars: list[int] = []
 
-    for timestamp, value in series.items():
-        current_time = pd.Timestamp(timestamp)
-        current_value = float(value)
+        for timestamp, value in series.items():
+            current_time = pd.Timestamp(timestamp)
+            current_value = float(value)
 
-        if current_value >= running_max:
-            if in_drawdown:
-                peak_to_recovery_bars = int(series.loc[running_max_time:current_time].shape[0] - 1)
-                if peak_to_recovery_bars > 0:
-                    completed_duration_bars.append(peak_to_recovery_bars)
-                in_drawdown = False
+            if current_value >= running_max:
+                if in_drawdown:
+                    peak_to_recovery_bars = int(series.loc[running_max_time:current_time].shape[0] - 1)
+                    if peak_to_recovery_bars > 0:
+                        completed_duration_bars.append(peak_to_recovery_bars)
+                    in_drawdown = False
 
-            running_max = current_value
-            running_max_time = current_time
-            continue
+                running_max = current_value
+                running_max_time = current_time
+                continue
 
-        if not in_drawdown:
-            in_drawdown = True
-            continue
+            if not in_drawdown:
+                in_drawdown = True
 
-    current_drawdown_bars = 0
-    if in_drawdown:
-        current_drawdown_bars = int(series.loc[running_max_time:].shape[0] - 1)
+        current_drawdown_bars = 0
+        if in_drawdown:
+            current_drawdown_bars = int(series.loc[running_max_time:].shape[0] - 1)
 
     completed_duration_bars.sort(reverse=True)
     all_duration_bars = completed_duration_bars.copy()

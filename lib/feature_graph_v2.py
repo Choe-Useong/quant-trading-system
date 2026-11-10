@@ -1,15 +1,72 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import MutableMapping
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 
-from lib.dataframes import read_wide_frames_from_cache
+from lib.dataframes import CACHE_ELIGIBILITY_FRAME, cache_data_usage_mask, read_wide_frames_from_cache
 from lib.specs import FeatureSpec
 
 CUSTOM_SOURCE_PREFIX = "custom:"
+
+
+class FeatureFrameCache(MutableMapping):
+    """Bounded LRU storage for reusable transform results within one grid run."""
+
+    def __init__(self, *, max_bytes: int = 128 * 1024 * 1024, max_entries: int = 128):
+        if max_bytes < 0 or max_entries < 0:
+            raise ValueError("Feature cache limits must be non-negative")
+        self.max_bytes = max_bytes
+        self.max_entries = max_entries
+        self.size_bytes = 0
+        self._frames = OrderedDict()
+        self._sizes = {}
+
+    def __getitem__(self, key):
+        value = self._frames[key]
+        self._frames.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, frame):
+        if key in self._frames:
+            del self[key]
+        size = int(frame.memory_usage(index=True, deep=True).sum())
+        if size > self.max_bytes or self.max_entries == 0:
+            return
+        while self._frames and (
+            self.size_bytes + size > self.max_bytes or len(self) >= self.max_entries
+        ):
+            del self[next(iter(self._frames))]
+        self._frames[key] = frame
+        self._sizes[key] = size
+        self.size_bytes += size
+
+    def __delitem__(self, key):
+        del self._frames[key]
+        self.size_bytes -= self._sizes.pop(key)
+
+    def __iter__(self):
+        return iter(self._frames)
+
+    def __len__(self):
+        return len(self._frames)
+
+
+def _frame_content_signature(frame: pd.DataFrame) -> bytes:
+    # Hash current content, not object identity: replacing or mutating an input
+    # must invalidate its descendants even if the feature names stay the same.
+    digest = sha256()
+    digest.update(repr((
+        tuple(frame.columns), tuple(frame.columns.names), tuple(map(str, frame.dtypes)),
+        str(frame.index.dtype), tuple(frame.index.names), getattr(frame.index, "freqstr", None),
+    )).encode())
+    digest.update(pd.util.hash_pandas_object(frame, index=True).to_numpy().tobytes())
+    return digest.digest()
 
 
 def _is_custom_source(source: str) -> bool:
@@ -27,13 +84,91 @@ def _parse_custom_source(source: str) -> str:
     return column
 
 
-def _parse_market_source(source: str) -> tuple[str, str]:
-    prefix, market, column = source.split(":", 2)
-    if prefix != "market":
+def _split_market_source(source: str) -> tuple[str, str]:
+    """Keep CCXT settlement suffixes in the symbol and custom: on the column."""
+    prefix, separator, body = source.partition(":")
+    if prefix != "market" or not separator:
         raise ValueError(f"Unsupported market source prefix: {source}")
+    if ":custom:" in body:
+        market, stem = body.split(":custom:", 1)
+        column = CUSTOM_SOURCE_PREFIX + stem
+    else:
+        market, separator, column = body.rpartition(":")
+        if not separator:
+            raise ValueError(f"market source must define a market and column: {source}")
+    if not market or not column:
+        raise ValueError(f"market source must define a market and column: {source}")
+    return market.upper(), column
+
+
+def _parse_market_source(source: str) -> tuple[str, str]:
+    market, column = _split_market_source(source)
     if _is_custom_source(column):
         column = _parse_custom_source(column)
-    return market.upper(), column
+    return market, column
+
+
+def _custom_source_columns(feature_specs: Sequence[FeatureSpec]) -> set[str]:
+    """Cache stems read through custom: sources (directly or via market:...:custom:)."""
+    columns: set[str] = set()
+    for spec in feature_specs:
+        if spec.source is None:
+            continue
+        if spec.source.startswith("market:"):
+            _, raw_column = _split_market_source(spec.source)
+            if _is_custom_source(raw_column):
+                columns.add(_parse_custom_source(raw_column))
+        elif _is_custom_source(spec.source):
+            columns.add(_parse_custom_source(spec.source))
+    return columns
+
+
+def _naive_utc(value) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    return stamp.tz_convert("UTC").tz_localize(None) if stamp.tzinfo is not None else stamp
+
+
+def _check_custom_source_coverage(
+    raw_source_frames: dict[str, pd.DataFrame],
+    custom_columns: set[str],
+    cache_dir: Path,
+) -> None:
+    """Refuse custom frames that end before the cache's price calendar.
+
+    Custom frames (fundamentals, share-class flags, ...) are built by other
+    tools on the price calendar of their build date. If prices are updated
+    later without rebuilding them, aligning to the price index would leave
+    the new dates silently missing and filters would drop markets (DATA-009).
+    """
+    if not custom_columns:
+        return
+    reference = raw_source_frames.get("trade_price")
+    if reference is not None and not reference.empty:
+        reference_end = _naive_utc(reference.index.max())
+    else:
+        # Shared feature sets often read only market_cap/flags; compare with the
+        # cache's price calendar when it exists (index plus one column).
+        price_path = Path(cache_dir) / "trade_price.parquet"
+        if not price_path.exists():
+            return
+        import pyarrow.parquet as pq
+        first_column = pq.ParquetFile(price_path).schema_arrow.names[0]
+        price_index = pd.read_parquet(price_path, columns=[first_column]).index
+        if len(price_index) == 0:
+            return
+        reference_end = _naive_utc(pd.to_datetime(price_index).max())
+    for name in sorted(custom_columns):
+        frame = raw_source_frames.get(name)
+        if frame is None or frame.empty:
+            continue
+        frame_end = _naive_utc(frame.index.max())
+        if frame_end < reference_end:
+            raise ValueError(
+                f"custom source '{name}' ends at {frame_end} but trade_price ends at {reference_end} "
+                f"in {cache_dir}; rebuild the custom frames after updating prices (for KR stock "
+                "fundamentals: scripts/kr_stocks/build_kr_stock_fundamental_cache.py with the "
+                "build_args recorded in fundamental_cache_report.json)"
+            )
 
 
 def _required_source_columns(
@@ -47,7 +182,7 @@ def _required_source_columns(
             continue
         if spec.source.startswith("market:"):
             uses_market_source = True
-            raw_column = spec.source.split(":", 2)[2]
+            _, raw_column = _split_market_source(spec.source)
             _, column = _parse_market_source(spec.source)
             if column in supported_source_columns or _is_custom_source(raw_column):
                 columns.add(column)
@@ -56,9 +191,16 @@ def _required_source_columns(
         elif spec.source in supported_source_columns:
             columns.add(spec.source)
         for step in spec.steps:
-            if step.kind == "true_range":
-                keys = ("low", "close")
-                references = [str(step.params.get(key, f"{key}_price")) for key in keys]
+            if step.kind in {
+                "vwma", "subtract_reference", "ratio_to_reference", "multiply_reference", "residualize_reference", "rolling_beta",
+                "elementwise_min", "elementwise_max",
+            }:
+                references = [str(step.params["reference"])]
+            elif step.kind == "true_range":
+                references = [
+                    str(step.params.get("low", "low_price")),
+                    str(step.params.get("close", "trade_price")),
+                ]
             elif step.kind == "corr_greedy_filter":
                 references = [
                     str(step.params.get("price_feature", "signal_price")),
@@ -119,19 +261,37 @@ def _logical_frame(operator: str, inputs: list[pd.DataFrame]) -> pd.DataFrame:
     return result.astype(float).where(mask)
 
 
-def _holding_state_frame(entry_frame: pd.DataFrame, exit_frame: pd.DataFrame, cooldown_bars: int = 0) -> pd.DataFrame:
+def _holding_state_frame(
+    entry_frame: pd.DataFrame, exit_frame: pd.DataFrame, cooldown_bars: int = 0,
+    max_holding_bars: int | None = None,
+) -> pd.DataFrame:
     if cooldown_bars < 0:
         raise ValueError("state.cooldown_bars must be non-negative")
+    if max_holding_bars is not None and (type(max_holding_bars) is not int or max_holding_bars <= 0):
+        raise ValueError("state.max_holding_bars must be a positive integer or null")
     entry_frame = entry_frame.astype(float)
     exit_frame = exit_frame.astype(float)
     result = pd.DataFrame(np.nan, index=entry_frame.index, columns=entry_frame.columns, dtype=float)
     for column in entry_frame.columns:
         holding = False
         cooldown_remaining = 0
+        entered_at = -1
+        entry_reset_required = False
         entry_values = entry_frame[column].to_numpy(dtype=float, copy=False)
         exit_values = exit_frame[column].to_numpy(dtype=float, copy=False)
         out = np.full(len(entry_frame.index), np.nan, dtype=float)
         for idx, (entry_value, exit_value) in enumerate(zip(entry_values, exit_values)):
+            # Count source rows, including missing observations, rather than
+            # extending the holding window until another valid signal appears.
+            if holding and max_holding_bars is not None and idx - entered_at >= max_holding_bars:
+                holding = False
+                entered_at = -1
+                cooldown_remaining = int(cooldown_bars)
+                entry_reset_required = np.isnan(entry_value) or entry_value != 0.0
+                out[idx] = 0.0
+                continue  # Expiry never opens another position on the same row.
+            if entry_reset_required and not np.isnan(entry_value) and entry_value == 0.0:
+                entry_reset_required = False
             if np.isnan(entry_value) or np.isnan(exit_value):
                 continue
             entry_flag = entry_value != 0.0
@@ -139,11 +299,13 @@ def _holding_state_frame(entry_frame: pd.DataFrame, exit_frame: pd.DataFrame, co
             if holding:
                 if exit_flag:
                     holding = False
+                    entered_at = -1
                     cooldown_remaining = int(cooldown_bars)
             elif cooldown_remaining > 0:
                 cooldown_remaining -= 1
-            elif entry_flag:
+            elif entry_flag and not entry_reset_required:
                 holding = True
+                entered_at = idx
             out[idx] = 1.0 if holding else 0.0
         result[column] = out
     return result
@@ -235,7 +397,9 @@ def _broadcast_market_source_frame(
     return pd.DataFrame(data, index=output_index, columns=output_columns)
 
 
-def _spec_dependencies(spec: FeatureSpec, supported_source_columns: set[str]) -> list[str]:
+def _spec_dependencies(
+    spec: FeatureSpec, supported_source_columns: set[str], *, include_source_columns: bool = False,
+) -> list[str]:
     if spec.compare is not None:
         dependencies = [spec.compare.left_feature]
         if spec.compare.right_feature is not None:
@@ -253,27 +417,34 @@ def _spec_dependencies(spec: FeatureSpec, supported_source_columns: set[str]) ->
         return []
     if spec.source.startswith("market:"):
         _, column = _parse_market_source(spec.source)
-        if column in supported_source_columns:
+        if not include_source_columns:
+            if column in supported_source_columns:
+                return []
+            _, raw_column = _split_market_source(spec.source)
+            return [] if _is_custom_source(raw_column) else [column]
+        source_reference = column
+    elif _is_custom_source(spec.source):
+        if not include_source_columns:
             return []
-        raw_column = spec.source.split(":", 2)[2]
-        if _is_custom_source(raw_column):
-            return []
-        return [column]
-    if _is_custom_source(spec.source):
-        return []
-    if spec.source in supported_source_columns:
+        source_reference = _parse_custom_source(spec.source)
+    else:
+        source_reference = spec.source
+    if source_reference in supported_source_columns and not include_source_columns:
         dependencies: list[str] = []
     else:
-        dependencies = [spec.source]
+        dependencies = [source_reference]
     for step in spec.steps:
-        if step.kind in {"subtract_reference", "ratio_to_reference", "residualize_reference"}:
+        if step.kind in {
+            "subtract_reference", "ratio_to_reference", "multiply_reference", "residualize_reference", "rolling_beta", "vwma",
+            "elementwise_min", "elementwise_max",
+        }:
             reference = str(step.params["reference"])
-            if reference not in supported_source_columns:
+            if include_source_columns or reference not in supported_source_columns:
                 dependencies.append(reference)
             continue
         if step.kind == "mask_by_feature":
             feature = str(step.params["feature"])
-            if feature not in supported_source_columns:
+            if include_source_columns or feature not in supported_source_columns:
                 dependencies.append(feature)
             continue
         if step.kind == "select_by_state":
@@ -283,12 +454,12 @@ def _spec_dependencies(spec: FeatureSpec, supported_source_columns: set[str]) ->
                 if (key.startswith("state_") and key.endswith("_feature")) or key == "default_feature"
             ]
             for feature in references:
-                if feature and feature not in supported_source_columns:
+                if feature and (include_source_columns or feature not in supported_source_columns):
                     dependencies.append(feature)
             continue
         if step.kind in {"group_demean", "group_rank", "group_percentile"}:
             group_feature = str(step.params["group_feature"])
-            if group_feature not in supported_source_columns:
+            if include_source_columns or group_feature not in supported_source_columns:
                 dependencies.append(group_feature)
             continue
         if step.kind == "corr_greedy_filter":
@@ -297,13 +468,13 @@ def _spec_dependencies(spec: FeatureSpec, supported_source_columns: set[str]) ->
                 ("liquidity_feature", "candle_acc_trade_price"),
             ):
                 reference = str(step.params.get(key, default))
-                if reference not in supported_source_columns:
+                if include_source_columns or reference not in supported_source_columns:
                     dependencies.append(reference)
             continue
         if step.kind == "true_range":
-            for key in ("low", "close"):
-                reference = str(step.params.get(key, f"{key}_price"))
-                if reference not in supported_source_columns:
+            for key, default in (("low", "low_price"), ("close", "trade_price")):
+                reference = str(step.params.get(key, default))
+                if include_source_columns or reference not in supported_source_columns:
                     dependencies.append(reference)
     return dependencies
 
@@ -316,6 +487,23 @@ def _step_signature(spec: FeatureSpec) -> tuple[Any, ...]:
         )
         for step in spec.steps
     )
+
+
+def select_feature_input_frames(
+    feature_specs: Sequence[FeatureSpec], available_frames: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """Pass only direct external inputs; the graph resolves declared ancestors.
+
+    Keep references here. The graph owns its working copies, and callers keep
+    the full shared dictionary for downstream universe/weight calculations.
+    """
+    from lib.features_v2 import SUPPORTED_SOURCE_COLUMNS
+
+    required, _ = _required_source_columns(feature_specs, SUPPORTED_SOURCE_COLUMNS)
+    required = set(required or {"trade_price"})
+    for spec in feature_specs:
+        required.update(_spec_dependencies(spec, SUPPORTED_SOURCE_COLUMNS, include_source_columns=True))
+    return {name: frame for name, frame in available_frames.items() if name in required}
 
 
 def _feature_spec_signature(spec: FeatureSpec) -> tuple[Any, ...]:
@@ -349,6 +537,7 @@ def _feature_spec_signature(spec: FeatureSpec) -> tuple[Any, ...]:
                 spec.state.entry_feature,
                 spec.state.exit_feature,
                 spec.state.cooldown_bars,
+                spec.state.max_holding_bars,
             )
         ),
         (
@@ -378,8 +567,9 @@ def build_feature_frames_from_cache_graph(
     max_markets: int | None = None,
     tail_rows: int | None = None,
     source_frames: dict[str, pd.DataFrame] | None = None,
-    frame_cache: dict[tuple[Any, ...], pd.DataFrame] | None = None,
+    frame_cache: MutableMapping[tuple[Any, ...], pd.DataFrame] | None = None,
     frame_cache_namespace: tuple[Any, ...] | None = None,
+    data_usage_starts: dict | None = None,
 ) -> dict[str, pd.DataFrame]:
     from lib import features_v2 as ops
 
@@ -400,11 +590,11 @@ def build_feature_frames_from_cache_graph(
         if missing_columns:
             raise ValueError(f"Missing source frames for frame_v2 graph: {missing_columns}")
         raw_source_frames = {
-            name: source_frames[name].copy()
+            name: source_frames[name]
             for name in sorted(required_source_columns)
         }
         extra_frames = {
-            name: frame.copy()
+            name: frame
             for name, frame in source_frames.items()
             if name not in raw_source_frames
         }
@@ -412,46 +602,118 @@ def build_feature_frames_from_cache_graph(
 
     primary_name = "trade_price" if "trade_price" in raw_source_frames else next(iter(raw_source_frames.keys()))
     primary_frame = raw_source_frames[primary_name]
+    _check_custom_source_coverage(raw_source_frames, _custom_source_columns(feature_specs), cache_dir)
     if output_market_columns is not None:
         output_columns = pd.Index([str(market).upper() for market in output_market_columns])
     else:
         output_columns = primary_frame.columns if max_markets is None else primary_frame.columns[:max_markets]
     source_columns = primary_frame.columns if max_markets is None else primary_frame.columns[:max_markets]
     output_index = primary_frame.index
+    usage = cache_data_usage_mask(cache_dir, output_index, primary_frame.columns.union(output_columns),
+                                 data_usage_starts=data_usage_starts)
+
+    def coverage(frame):
+        return frame if usage is None else frame.where(usage.reindex(index=frame.index, columns=frame.columns).eq(True))
 
     frames: dict[str, pd.DataFrame] = {}
+    def prepare_input(frame, columns):
+        aligned = frame if frame.index.identical(output_index) and frame.columns.identical(columns) else frame.reindex(
+            index=output_index, columns=columns, copy=False)
+        # One owned copy, either from where() or copy(). Never mutate caller data.
+        return aligned.copy() if usage is None else coverage(aligned)
+
     for name, frame in raw_source_frames.items():
         frame_columns = source_columns
         if uses_market_source:
             frame_columns = source_columns.union(frame.columns)
-        frames[name] = frame.reindex(index=output_index, columns=frame_columns).copy()
+        frames[name] = prepare_input(frame, frame_columns)
     for name, frame in extra_frames.items():
-        frames[name] = frame.reindex(index=output_index, columns=output_columns).copy()
+        frames[name] = prepare_input(frame, output_columns)
 
     specs_by_name: dict[str, FeatureSpec] = {}
     for spec in feature_specs:
         column_name = spec.resolved_column_name()
+        if column_name == CACHE_ELIGIBILITY_FRAME:
+            raise ValueError(f"Reserved cache eligibility feature name: {column_name}")
         if column_name in specs_by_name:
             raise ValueError(f"Duplicate frame_v2 feature column name: {column_name}")
         specs_by_name[column_name] = spec
 
     evaluating: set[str] = set()
+    input_names = set(frames)
+    covered_names = set(frames)
+    signatures: dict[str, bytes] = {}
+    signing: set[str] = set()
+
+    def _signature(name: str) -> bytes:
+        if name in signatures:
+            return signatures[name]
+        if name in input_names:
+            signatures[name] = _frame_content_signature(frames[name])
+            return signatures[name]
+        spec = specs_by_name.get(name)
+        if spec is None:
+            raise ValueError(f"Unknown frame_v2 graph dependency: {name}")
+        if name in signing:
+            raise ValueError(f"Cyclic frame_v2 feature dependency detected at: {name}")
+        signing.add(name)
+        try:
+            dependencies = tuple(
+                (dependency, _signature(dependency))
+                for dependency in _spec_dependencies(
+                    spec, ops.SUPPORTED_SOURCE_COLUMNS, include_source_columns=True,
+                )
+            )
+            signatures[name] = sha256(repr((
+                _feature_spec_signature(spec), dependencies,
+            )).encode()).digest()
+            return signatures[name]
+        finally:
+            signing.remove(name)
+
+    cache_context = None
+    if frame_cache is not None:
+        index_digest = sha256(pd.util.hash_pandas_object(output_index).to_numpy().tobytes()).digest()
+        cache_context = (
+            tuple(output_columns), tuple(output_columns.names), index_digest,
+            str(output_index.dtype), tuple(output_index.names), getattr(output_index, "freqstr", None),
+        )
+        if usage is not None:
+            cache_context += (usage.attrs["data_usage_signature"],)
 
     def _ensure_frame(name: str) -> pd.DataFrame:
+        # Mask every dependency, including negated conditions, before another
+        # stateful feature can consume it and enter during excluded history.
+        frame = _evaluate_frame(name)
+        if name not in covered_names:
+            frames[name] = coverage(frame)
+            covered_names.add(name)
+        return frames[name]
+
+    def _evaluate_frame(name: str) -> pd.DataFrame:
         if name in frames:
             return frames[name]
         spec = specs_by_name.get(name)
         if spec is None:
             raise ValueError(f"Unknown frame_v2 graph dependency: {name}")
         cache_key = None
-        if frame_cache is not None:
+        # Keep the budget for transforms (EMA, rolling statistics, ratios, ...),
+        # rather than filling it with inexpensive Boolean and holding outputs.
+        # Numeric transform outputs are float64 on the declared output grid.
+        # Oversized frames cannot enter the bounded cache; avoid hashing every
+        # large ancestor merely to construct a key that will never be retained.
+        oversized = isinstance(frame_cache, FeatureFrameCache) and (
+            len(output_index) * len(output_columns) * 8 > frame_cache.max_bytes)
+        if frame_cache is not None and spec.steps and not oversized:
             cache_key = (
                 frame_cache_namespace or (),
-                _feature_spec_signature(spec),
+                cache_context,
+                _signature(name),
             )
             cached = frame_cache.get(cache_key)
             if cached is not None:
                 frames[name] = cached
+                covered_names.add(name)
                 return frames[name]
         if name in evaluating:
             raise ValueError(f"Cyclic frame_v2 feature dependency detected at: {name}")
@@ -485,6 +747,7 @@ def build_feature_frames_from_cache_graph(
                     entry_frame,
                     exit_frame,
                     cooldown_bars=int(spec.state.cooldown_bars),
+                    max_holding_bars=spec.state.max_holding_bars,
                 )
                 if cache_key is not None:
                     frame_cache[cache_key] = frames[name]
@@ -530,6 +793,8 @@ def build_feature_frames_from_cache_graph(
                     output_index,
                     output_columns,
                 )
+                # Reference-market history must also obey each output's history.
+                current = coverage(current)
             elif _is_custom_source(spec.source):
                 column = _parse_custom_source(spec.source)
                 if column not in frames:
@@ -541,15 +806,28 @@ def build_feature_frames_from_cache_graph(
                 current = frames[spec.source].copy()
 
             for step in spec.steps:
-                current = ops._apply_transform(current, step.kind, step.params, frames)
-            frames[name] = current.reindex(index=output_index, columns=output_columns).sort_index(axis=1)
+                current = coverage(ops._apply_transform(current, step.kind, step.params, frames))
+            if not current.index.identical(output_index) or not current.columns.identical(output_columns):
+                current = current.reindex(index=output_index, columns=output_columns)
+            if not current.columns.is_monotonic_increasing:
+                current = current.sort_index(axis=1)
+            frames[name] = current
+            covered_names.add(name)
             if cache_key is not None:
                 frame_cache[cache_key] = frames[name]
             return frames[name]
         finally:
             evaluating.remove(name)
 
-    for spec in feature_specs:
-        _ensure_frame(spec.resolved_column_name())
+    try:
+        for spec in feature_specs:
+            _ensure_frame(spec.resolved_column_name())
 
-    return frames
+        if usage is not None:
+            frames[CACHE_ELIGIBILITY_FRAME] = usage
+        return frames
+    finally:
+        # Recursive local functions form reference cycles through their closure
+        # cells. Break them explicitly so discarded NumPy buffers are released
+        # now, rather than waiting for Python's object-count-based cyclic GC.
+        del _ensure_frame, _evaluate_frame, _signature

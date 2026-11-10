@@ -59,6 +59,12 @@ class StateSpec:
     entry_feature: str
     exit_feature: str
     cooldown_bars: int = 0
+    max_holding_bars: int | None = None
+
+    def __post_init__(self):
+        value = self.max_holding_bars
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError("state.max_holding_bars must be a positive integer or null")
 
 
 @dataclass(frozen=True)
@@ -99,7 +105,8 @@ class FeatureSpec:
             return f"{self.logical.operator}__{joined}"
         if self.state is not None:
             cooldown_suffix = "" if self.state.cooldown_bars <= 0 else f"__cooldown{self.state.cooldown_bars}"
-            return f"hold__{self.state.entry_feature}__until__{self.state.exit_feature}{cooldown_suffix}"
+            limit_suffix = "" if self.state.max_holding_bars is None else f"__maxhold{self.state.max_holding_bars}"
+            return f"hold__{self.state.entry_feature}__until__{self.state.exit_feature}{cooldown_suffix}{limit_suffix}"
         if self.breadth is not None:
             if self.breadth.mode == "top_n":
                 order = "asc" if self.breadth.ascending else "desc"
@@ -181,6 +188,34 @@ class PortfolioVolTargetSpec:
 
 
 @dataclass(frozen=True)
+class HedgeSpec:
+    market: str
+    mode: str = "beta"
+    beta_feature: str | None = None
+    beta_lag: int = 1
+    ratio: float = 1.0
+
+
+@dataclass(frozen=True)
+class HoldingSelectionSpec:
+    exit_feature: str
+    exit_lag: int = 0
+    max_holding_bars: int | None = None
+    cooldown_bars: int = 0
+
+    def __post_init__(self):
+        if not isinstance(self.exit_feature, str) or not self.exit_feature.strip():
+            raise ValueError("universe.holding.exit_feature must be a non-empty feature name")
+        for name in ("exit_lag", "cooldown_bars"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"universe.holding.{name} must be a non-negative integer")
+        value = self.max_holding_bars
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError("universe.holding.max_holding_bars must be a positive integer or null")
+
+
+@dataclass(frozen=True)
 class UniverseSpec:
     feature_column: str
     sort_column: str | None = None
@@ -201,6 +236,21 @@ class UniverseSpec:
     rank_filters: tuple[RankFilterSpec, ...] = ()
     filter_stages: tuple[FilterStageSpec, ...] = ()
     name: str | None = None
+    holding: HoldingSelectionSpec | None = None
+
+    def __post_init__(self):
+        if self.holding is None:
+            return
+        if not isinstance(self.holding, HoldingSelectionSpec):
+            raise ValueError("universe.holding must be a HoldingSelectionSpec")
+        if self.mode != "top_n" or type(self.top_n) is not int or self.top_n <= 0:
+            raise ValueError("universe.holding requires mode='top_n' and a positive integer top_n")
+        if self.scope not in {"filtered", "candidates"}:
+            raise ValueError("universe.holding requires filtered candidate ranking")
+        lags = [self.lag, self.signal_lag, *(f.lag for f in self.value_filters),
+                *(f.lag for f in self.rank_filters), *(f.lag for s in self.filter_stages for f in s.filters)]
+        if any(type(lag) is not int or lag < 0 for lag in lags):
+            raise ValueError("universe.holding requires non-negative integer lags")
 
     def resolved_name(self) -> str:
         sort_column = self.sort_column or self.feature_column
@@ -213,7 +263,11 @@ class UniverseSpec:
             return self.name
         if self.mode == "top_n":
             order = "asc" if self.ascending else "desc"
-            return f"{sort_column}_{lag_part}_{order}_top{self.top_n}"
+            suffix = ""
+            if self.holding is not None:
+                h = self.holding
+                suffix = f"_hold_{h.exit_feature}_xlag{h.exit_lag}_max{h.max_holding_bars}_cool{h.cooldown_bars}"
+            return f"{sort_column}_{lag_part}_{order}_top{self.top_n}{suffix}"
         if self.mode == "all":
             return f"{sort_column}_{lag_part}_all"
         order = "asc" if self.ascending else "desc"
@@ -251,6 +305,7 @@ class WeightSpec:
     listed_feature: str = "trade_price"
     gross_exposure_update_frequency: str = ""
     output_mode: str = ""
+    change_only_scope: str = "portfolio"
     hrp_window: int = 126
     hrp_min_valid_ratio: float = 0.9
     hrp_min_pair_obs_ratio: float = 0.8
@@ -263,14 +318,30 @@ class WeightSpec:
     cluster_price_feature: str = "trade_price"
     defensive_sleeve: DefensiveSleeveSpec | None = None
     portfolio_vol_target: PortfolioVolTargetSpec | None = None
+    hedge: HedgeSpec | None = None
+    long_exposure: float = 0.5
+    short_exposure: float = 0.5
+    long_exposure_feature: str | None = None
+    short_exposure_feature: str | None = None
+    long_exposure_lag: int = 0
+    short_exposure_lag: int = 0
+    long_filter: RankFilterSpec | FilterStageSpec | None = None
+    short_filter: RankFilterSpec | FilterStageSpec | None = None
 
     def resolved_name(self) -> str:
         prefix = self.universe_name or "universe"
         schedule_suffix = str(self.rebalance_frequency)
+        if self.hedge is not None:
+            hedge = self.hedge
+            market_token = hedge.market.replace(":", "_").replace("/", "_")
+            feature_token = (hedge.beta_feature or "none").replace(":", "_").replace("/", "_")
+            schedule_suffix += f"_hedge{market_token}_{hedge.mode}_{feature_token}_lag{hedge.beta_lag}_r{hedge.ratio:g}"
         if self.gross_exposure_update_frequency:
             schedule_suffix += f"_gupd{self.gross_exposure_update_frequency}"
         if self.output_mode:
             schedule_suffix += f"_out{self.output_mode}"
+        if self.change_only_scope != "portfolio":
+            schedule_suffix += f"_scope{self.change_only_scope}"
         if self.portfolio_vol_target is not None:
             target = self.portfolio_vol_target
             price_token = (
@@ -334,6 +405,17 @@ class WeightSpec:
                 f"_gross{sleeve.gross_exposure:g}"
                 f"_{market_token}"
             )
+        if self.weighting == "long_short_equal":
+            from hashlib import sha256
+            direction = (self.position_score_feature, self.position_score_lag,
+                         self.long_filter, self.short_filter)
+            if self.long_exposure_feature or self.short_exposure_feature:
+                direction += (self.long_exposure_feature, self.long_exposure_lag,
+                              self.short_exposure_feature, self.short_exposure_lag)
+            token = sha256(repr(direction).encode()).hexdigest()[:16]
+            return (f"{prefix}__long_short_equal_{schedule_suffix}"
+                    f"_long{self.long_exposure:g}_short{self.short_exposure:g}_{token}"
+                    f"{exposure_suffix}{defensive_suffix}")
         if self.weighting == "equal":
             return (
                 f"{prefix}__equal_{schedule_suffix}"

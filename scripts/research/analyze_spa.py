@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.research.analyze_pbo import _build_candidate_frames
+from scripts.run_cross_section_grid_v2 import materialize_candidate_features, release_candidate_features
 from scripts.walkforward.run_cross_section_grid_walkforward_v2 import (
     _available_any_timestamps,
     _available_timestamps,
@@ -22,7 +23,7 @@ from scripts.walkforward.run_cross_section_grid_walkforward_v2 import (
 )
 from scripts.run_vectorbt import (
     compute_return_series,
-    infer_periods_per_year,
+    resolve_periods_per_year,
     infer_timeframe,
     load_price_frame,
 )
@@ -63,7 +64,8 @@ def main() -> int:
     out_dir = Path(args.out_dir) if args.out_dir else _default_out_dir(config_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    candle_dir, source_cache_dir, primary_market, combinations, candidate_payloads = _build_candidate_frames(config)
+    candle_dir, source_cache_dir, primary_market, combinations, candidate_payloads = _build_candidate_frames(
+        config, **({"preselection_out_dir": out_dir} if config.get("preselection") is not None else {}))
     max_markets = config.get("max_markets")
 
     first_candidate = next(iter(candidate_payloads.values()))
@@ -77,7 +79,8 @@ def main() -> int:
         source_cache_dir=source_cache_dir,
         market_columns=[primary_market],
     )
-    timestamps = _available_timestamps(timestamp_price_frame, primary_market)
+    timestamps = (pd.DatetimeIndex(timestamp_price_frame.index) if config.get("preselection") is not None
+                  and not (config.get("tail_hours") or 0) > 0 else _available_timestamps(timestamp_price_frame, primary_market))
     if timestamps.empty:
         timestamp_price_frame = load_price_frame(
             candle_dir,
@@ -96,26 +99,31 @@ def main() -> int:
     excess_return_series: dict[str, pd.Series] = {}
     candidate_rows: list[dict[str, Any]] = []
 
-    timeframe = infer_timeframe(candle_dir, None)
-    periods_per_year = infer_periods_per_year(timeframe)
+    timeframe = infer_timeframe(candle_dir, first_vectorbt_payload.get("timeframe"))
+    periods_per_year = resolve_periods_per_year(timeframe, first_vectorbt_payload.get("periods_per_year"))
 
     for candidate_label, payloads in sorted(candidate_payloads.items()):
-        universe_payload, weight_payload, vectorbt_payload, required_feature_markets, feature_frames, warning_frame = payloads
-        result = _run_v2_backtest_window(
-            candle_dir,
-            source_cache_dir,
-            feature_frames,
-            warning_frame,
-            required_feature_markets,
-            universe_payload,
-            weight_payload,
-            vectorbt_payload,
-            price_frame_cache,
-            max_markets,
-            eval_start=eval_start,
-            eval_end=eval_end,
-            include_curves=True,
-        )
+        universe_payload, weight_payload, vectorbt_payload, required_feature_markets, feature_frames, warning_frame = payloads[:6]
+        preselection = payloads[6] if config.get("preselection") is not None else None
+        try:
+            result = _run_v2_backtest_window(
+                candle_dir,
+                source_cache_dir,
+                materialize_candidate_features(feature_frames),
+                warning_frame,
+                required_feature_markets,
+                universe_payload,
+                weight_payload,
+                vectorbt_payload,
+                price_frame_cache,
+                max_markets,
+                eval_start=eval_start,
+                eval_end=eval_end,
+                include_curves=True,
+                **({"preselection": preselection} if preselection is not None else {}),
+            )
+        finally:
+            release_candidate_features(feature_frames)
         if result.get("status") != "ok":
             continue
         equity_curve = result["_equity_curve"]
@@ -138,6 +146,7 @@ def main() -> int:
                 "candidate_full_sample_cagr_pct": float(result.get("CAGR [%]", float("nan"))),
                 "candidate_full_sample_mdd_pct": float(result.get("Max Drawdown [%]", float("nan"))),
                 "candidate_full_sample_bars": int(len(excess_returns)),
+                **({"preselection_key": preselection["key"]} if preselection is not None else {}),
             }
         )
 
@@ -200,6 +209,10 @@ def main() -> int:
         "observed_best_mean_excess_return_per_bar": observed_best_mean,
         "observed_best_annualized_excess_return_pct": _annualized_excess_return_pct(observed_best_mean, periods_per_year),
     }
+    if config.get("preselection") is not None:
+        summary["preselection"] = {label: {name: p[6][name]
+            for name in ("key", "manifest_path", "mask_path", "project")}
+            for label, p in candidate_payloads.items()}
 
     excess_frame.to_parquet(out_dir / "spa_excess_return_matrix.parquet")
     candidate_summary.to_csv(out_dir / "spa_candidate_stats.csv", index=False)

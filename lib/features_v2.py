@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 import math
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
+from numba import njit
 from hmmlearn import _hmmc
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
@@ -65,6 +67,7 @@ SUPPORTED_TRANSFORMS = {
     "delta",
     "ewma",
     "wma",
+    "vwma",
     "age_days",
     "cross_rank",
     "cross_percentile",
@@ -72,13 +75,17 @@ SUPPORTED_TRANSFORMS = {
     "group_rank",
     "group_percentile",
     "calendar_hold",
+    "calendar_start_value",
     "calendar_mean",
     "calendar_rolling_robust_mean",
+    "calendar_rolling_median",
     "calendar_rolling_sum",
     "gaussian_signed",
     "residualize_reference",
+    "rolling_beta",
     "subtract_reference",
     "ratio_to_reference",
+    "multiply_reference",
 }
 
 
@@ -115,20 +122,23 @@ def _apply_per_market_tail(
 def _ewma_series(series: pd.Series, window: int) -> pd.Series:
     if window <= 0:
         raise ValueError("window must be positive")
-    result = pd.Series(np.nan, index=series.index, dtype=float)
+    result = np.full(len(series), np.nan, dtype=float)
     valid = series.dropna()
     if len(valid) < window:
-        return result
+        return pd.Series(result, index=series.index)
 
     alpha = 2.0 / (window + 1.0)
-    seed_index = valid.index[:window]
+    positions = np.flatnonzero(series.notna().to_numpy())
+    values = valid.to_numpy(dtype=float, copy=False)
+    # Retain the SMA seed and the original Python-float arithmetic, including
+    # skipping missing observations rather than advancing the EMA across gaps.
     current = float(valid.iloc[:window].mean())
-    result.loc[seed_index[-1]] = current
+    result[positions[window - 1]] = current
 
-    for timestamp in valid.index[window:]:
-        current = (alpha * float(valid.at[timestamp])) + ((1.0 - alpha) * current)
-        result.loc[timestamp] = current
-    return result
+    for offset in range(window, len(values)):
+        current = (alpha * float(values[offset])) + ((1.0 - alpha) * current)
+        result[positions[offset]] = current
+    return pd.Series(result, index=series.index)
 
 
 def _wma_series(series: pd.Series, window: int) -> pd.Series:
@@ -181,8 +191,24 @@ def _shift_frame(frame: pd.DataFrame, periods: int) -> pd.DataFrame:
     return _apply_by_market_column(frame, lambda series: series.shift(periods))
 
 
-def _simple_return_frame(frame: pd.DataFrame, periods: int) -> pd.DataFrame:
-    return _apply_by_market_column(frame, lambda series: (series / series.shift(periods)) - 1.0)
+def _simple_return_frame(
+    frame: pd.DataFrame, periods: int, missing_policy: str = "skip",
+) -> pd.DataFrame:
+    if missing_policy == "skip":
+        # Preserve existing configs: periods count non-missing observations.
+        return _apply_by_market_column(frame, lambda series: (series / series.shift(periods)) - 1.0)
+    if missing_policy != "preserve":
+        raise ValueError("simple_return missing_policy must be 'skip' or 'preserve'")
+    if periods <= 0:
+        raise ValueError("simple_return with missing_policy='preserve' requires a positive window")
+    if not frame.index.is_unique or not frame.index.is_monotonic_increasing:
+        raise ValueError("simple_return with missing_policy='preserve' requires ordered unique timestamps")
+    # Shift along the original row grid, not a per-market dropna timeline.
+    numeric = frame.astype(float)
+    previous = numeric.shift(periods)
+    valid = np.isfinite(numeric) & np.isfinite(previous) & previous.ne(0.0)
+    result = numeric.div(previous.where(valid)).sub(1.0)
+    return result.where(valid & np.isfinite(result)).sort_index(axis=1)
 
 
 def _normalize_period_freq(freq: str) -> str:
@@ -322,6 +348,74 @@ def _calendar_mean_frame(
         freq=period_freq,
         signal_timing=signal_timing,
     )
+
+
+def _calendar_start_value_frame(frame: pd.DataFrame, *, freq: str) -> pd.DataFrame:
+    """Hold the exact UTC period-boundary value; never search ahead for a quote."""
+    if (not isinstance(frame.index, pd.DatetimeIndex) or frame.index.hasnans
+            or not frame.index.is_unique or not frame.index.is_monotonic_increasing):
+        raise ValueError("calendar_start_value requires ordered unique non-null datetime timestamps")
+    values = frame.astype(float, copy=False)
+    if values.empty:
+        return values.copy()
+    index = frame.index
+    if index.tz is not None:
+        index = index.tz_convert("UTC").tz_localize(None)
+    starts = index.to_period(_normalize_period_freq(freq)).start_time
+    # Every lookup is at or before its output row. Missing boundary rows/values
+    # stay missing, including partial first periods and midperiod listings.
+    anchors = values.set_axis(index, copy=False).reindex(starts.unique())
+    anchors = anchors.where(np.isfinite(anchors))
+    return anchors.reindex(starts).set_axis(frame.index, copy=False)
+
+
+def _calendar_rolling_median_frame(
+    frame: pd.DataFrame,
+    *,
+    freq: str,
+    periods: int,
+    aggregation: str = "last",
+    min_count: int = 1,
+    signal_timing: str = "next_period",
+) -> pd.DataFrame:
+    """Median of consecutive completed calendar-period aggregates, in UTC."""
+    for name, value in (("periods", periods), ("min_count", min_count)):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0:
+            raise ValueError(f"calendar_rolling_median {name} must be a positive integer")
+    aggregation = str(aggregation).strip().lower()
+    if aggregation not in {"last", "sum", "mean"}:
+        raise ValueError("calendar_rolling_median aggregation must be 'last', 'sum' or 'mean'")
+    if str(signal_timing).strip().lower() != "next_period":
+        raise ValueError("calendar_rolling_median requires signal_timing='next_period' to use completed periods")
+    if (not isinstance(frame.index, pd.DatetimeIndex) or frame.index.hasnans
+            or not frame.index.is_unique or not frame.index.is_monotonic_increasing):
+        raise ValueError("calendar_rolling_median requires ordered unique non-null datetime timestamps")
+    values = frame.astype(float, copy=False)
+    if values.empty:
+        return values.copy()
+    if values.index.tz is not None:
+        values = values.copy(deep=False)
+        values.index = values.index.tz_convert("UTC").tz_localize(None)
+    period_freq = _normalize_period_freq(freq)
+    period_index = values.index.to_period(period_freq)
+    groups = values.groupby(period_index)
+    counts = np.isfinite(values).groupby(period_index).sum()
+    if aggregation == "sum":
+        aggregate = groups.sum(min_count=int(min_count))
+    elif aggregation == "mean":
+        aggregate = groups.mean()
+    else:
+        aggregate = groups.last()
+    aggregate = aggregate.where(counts.ge(min_count) & np.isfinite(aggregate))
+    # Missing whole days/months stay in the window, rather than being skipped.
+    calendar = pd.period_range(period_index.min(), period_index.max(), freq=period_freq)
+    median = aggregate.reindex(calendar).rolling(int(periods), min_periods=int(periods)).median()
+    # Broadcast known past statistics even if today's input is missing. Current
+    # execution eligibility remains the responsibility of the existing cache mask.
+    result = _map_period_frame_to_daily(values, median, freq=period_freq,
+                                       signal_timing="next_period", preserve_input_mask=False)
+    result.index = frame.index
+    return result
 
 
 def _calendar_hold_frame(
@@ -1074,8 +1168,14 @@ def _rolling_mean_frame(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return _apply_by_market_column(frame, lambda series: _rolling_mean_series_fast(series, window))
 
 
-def _rolling_sum_frame(frame: pd.DataFrame, window: int) -> pd.DataFrame:
-    return _apply_by_market_column(frame, lambda series: _rolling_sum_series_fast(series, window))
+def _rolling_sum_frame(frame: pd.DataFrame, window: int, missing_policy: str = "skip") -> pd.DataFrame:
+    if missing_policy == "skip":
+        return _apply_by_market_column(frame, lambda series: _rolling_sum_series_fast(series, window))
+    if missing_policy != "preserve":
+        raise ValueError("rolling_sum missing_policy must be 'skip' or 'preserve'")
+    if window <= 0 or frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        raise ValueError("rolling_sum with missing_policy='preserve' requires a positive window and ordered unique timestamps")
+    return frame.rolling(window=window, min_periods=window).sum()
 
 
 def _rolling_std_frame(frame: pd.DataFrame, window: int) -> pd.DataFrame:
@@ -1570,8 +1670,8 @@ def _reference_aligned(
     frame: pd.DataFrame,
     reference_frame: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    left = frame.astype(float)
-    right = reference_frame.reindex(index=left.index, columns=left.columns).astype(float)
+    left = frame.astype(float, copy=False)
+    right = reference_frame.reindex(index=left.index, columns=left.columns, copy=False).astype(float, copy=False)
     mask = left.notna() & right.notna()
     return left, right, mask
 
@@ -1585,6 +1685,97 @@ def _ratio_to_reference_frame(frame: pd.DataFrame, reference_frame: pd.DataFrame
     left, right, mask = _reference_aligned(frame, reference_frame)
     nonzero = right.ne(0.0)
     return left.div(right.where(nonzero)).where(mask & nonzero)
+
+
+def _multiply_reference_frame(frame: pd.DataFrame, reference_frame: pd.DataFrame) -> pd.DataFrame:
+    left, right, mask = _reference_aligned(frame, reference_frame)
+    return left.mul(right).where(mask)
+
+
+def _vwma_frame(frame: pd.DataFrame, reference_frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Trailing price-volume mean; incomplete windows and zero volume stay undefined."""
+    if window <= 0:
+        raise ValueError("vwma window must be positive")
+    prices, volumes, mask = _reference_aligned(frame, reference_frame)
+    if volumes.lt(0).any().any():
+        raise ValueError("vwma reference volumes must be nonnegative")
+    mask &= np.isfinite(prices) & np.isfinite(volumes)
+    turnover = prices.mul(volumes).where(mask).rolling(window, min_periods=window).sum()
+    volume_sum = volumes.where(mask).rolling(window, min_periods=window).sum()
+    result = turnover.div(volume_sum.where(volume_sum.gt(0)))
+    return result.where(np.isfinite(result))
+
+
+@njit(cache=True, fastmath=False)
+def _rolling_beta_values(asset: np.ndarray, reference: np.ndarray, window: int) -> np.ndarray:
+    """Trailing row windows, paired finite observations, O(rows * markets).
+
+    Stable add/remove covariance updates avoid subtracting large raw moments.
+    Rebuilding once per window bounds accumulated roundoff at amortized O(1).
+    A complete window is required; missing rows are never compressed away.
+    """
+    rows, columns = asset.shape
+    result = np.full((rows, columns), np.nan)
+    for column in range(columns):
+        count = 0
+        changes = 0
+        mean_x = mean_y = covariance = variance = 0.0
+        for row in range(rows):
+            if row % window == 0:
+                count = 0
+                changes = 0
+                mean_x = mean_y = covariance = variance = 0.0
+                start = max(0, row - window + 1)
+                for position in range(start + 1, row + 1):
+                    if reference[position, column] != reference[position - 1, column]:
+                        changes += 1
+            else:
+                start = row
+                if row >= window and reference[row - window, column] != reference[row - window + 1, column]:
+                    changes -= 1
+                if reference[row, column] != reference[row - 1, column]:
+                    changes += 1
+                if row >= window:
+                    x = asset[row - window, column]
+                    y = reference[row - window, column]
+                    if np.isfinite(x) and np.isfinite(y):
+                        if count <= 1:
+                            count = 0
+                            mean_x = mean_y = covariance = variance = 0.0
+                        else:
+                            next_mean_x = mean_x - (x - mean_x) / (count - 1)
+                            next_mean_y = mean_y - (y - mean_y) / (count - 1)
+                            covariance -= (x - mean_x) * (y - next_mean_y)
+                            variance -= (y - mean_y) * (y - next_mean_y)
+                            mean_x, mean_y = next_mean_x, next_mean_y
+                            count -= 1
+            for position in range(start, row + 1):
+                x = asset[position, column]
+                y = reference[position, column]
+                if np.isfinite(x) and np.isfinite(y):
+                    count += 1
+                    dx, dy = x - mean_x, y - mean_y
+                    mean_x += dx / count
+                    mean_y += dy / count
+                    covariance += dx * (y - mean_y)
+                    variance += dy * (y - mean_y)
+            if count == window and changes > 0 and variance > 0.0:
+                value = covariance / variance
+                if np.isfinite(value):
+                    result[row, column] = value
+    return result
+
+
+def _rolling_beta_frame(frame: pd.DataFrame, reference_frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    if isinstance(window, bool) or not np.isfinite(float(window)) or int(window) != float(window) or int(window) < 2:
+        raise ValueError("rolling_beta window must be an integer greater than 1")
+    if not frame.index.is_unique or not frame.index.is_monotonic_increasing or not frame.columns.is_unique:
+        raise ValueError("rolling_beta requires unique columns and ordered unique timestamps")
+    if not reference_frame.index.is_unique or not reference_frame.columns.is_unique:
+        raise ValueError("rolling_beta reference must have unique timestamps and columns")
+    reference = reference_frame.reindex(index=frame.index, columns=frame.columns)
+    values = _rolling_beta_values(frame.to_numpy(dtype=np.float64), reference.to_numpy(dtype=np.float64), int(window))
+    return pd.DataFrame(values, index=frame.index, columns=frame.columns)
 
 
 def _residualize_reference_frame(
@@ -1726,7 +1917,7 @@ def _apply_transform(
     if kind == "rolling_mean":
         return _rolling_mean_frame(frame, int(params["window"]))
     if kind == "rolling_sum":
-        return _rolling_sum_frame(frame, int(params["window"]))
+        return _rolling_sum_frame(frame, int(params["window"]), params.get("missing_policy", "skip"))
     if kind == "rolling_std":
         return _rolling_std_frame(frame, int(params["window"]))
     if kind == "expanding_std":
@@ -1764,7 +1955,7 @@ def _apply_transform(
             signal_timing=str(params.get("signal_timing", "next_period")),
         )
     if kind == "simple_return":
-        return _simple_return_frame(frame, int(params["window"]))
+        return _simple_return_frame(frame, int(params["window"]), params.get("missing_policy", "skip"))
     if kind == "shift":
         return _shift_frame(frame, int(params.get("periods", 1)))
     if kind == "delta":
@@ -1773,6 +1964,11 @@ def _apply_transform(
         return _ewma_frame(frame, int(params["window"]))
     if kind == "wma":
         return _wma_frame(frame, int(params["window"]))
+    if kind == "vwma":
+        reference = str(params["reference"])
+        if available_frames is None or reference not in available_frames:
+            raise ValueError(f"Unknown reference frame for vwma: {reference}")
+        return _vwma_frame(frame, available_frames[reference], int(params["window"]))
     if kind == "age_days":
         return _age_days_frame(frame)
     if kind == "cross_rank":
@@ -1817,11 +2013,19 @@ def _apply_transform(
             anchor=str(params.get("anchor", "calendar")),
             broadcast_sparse=bool(params.get("broadcast_sparse", False)),
         )
+    if kind == "calendar_start_value":
+        return _calendar_start_value_frame(frame, freq=str(params.get("freq", "D")))
     if kind == "calendar_mean":
         return _calendar_mean_frame(
             frame,
             freq=str(params.get("freq", "M")),
             signal_timing=str(params.get("signal_timing", "same_period")),
+        )
+    if kind == "calendar_rolling_median":
+        return _calendar_rolling_median_frame(
+            frame, freq=str(params.get("freq", "D")), periods=params["periods"],
+            aggregation=str(params.get("aggregation", "last")), min_count=params.get("min_count", 1),
+            signal_timing=str(params.get("signal_timing", "next_period")),
         )
     if kind == "calendar_rolling_robust_mean":
         return _calendar_rolling_robust_mean_frame(
@@ -1853,6 +2057,11 @@ def _apply_transform(
         if available_frames is None or reference not in available_frames:
             raise ValueError(f"Unknown reference frame for ratio_to_reference: {reference}")
         return _ratio_to_reference_frame(frame, available_frames[reference])
+    if kind == "multiply_reference":
+        reference = str(params["reference"])
+        if available_frames is None or reference not in available_frames:
+            raise ValueError(f"Unknown reference frame for multiply_reference: {reference}")
+        return _multiply_reference_frame(frame, available_frames[reference])
     if kind == "residualize_reference":
         reference = str(params["reference"])
         if available_frames is None or reference not in available_frames:
@@ -1862,6 +2071,11 @@ def _apply_transform(
             available_frames[reference],
             int(params["beta_window"]),
         )
+    if kind == "rolling_beta":
+        reference = str(params["reference"])
+        if available_frames is None or reference not in available_frames:
+            raise ValueError(f"Unknown reference frame for rolling_beta: {reference}")
+        return _rolling_beta_frame(frame, available_frames[reference], params["window"])
     raise ValueError(f"Unsupported frame_v2 transform: {kind}")
 
 
@@ -1918,8 +2132,9 @@ def build_feature_frames_from_cache(
     max_markets: int | None = None,
     tail_rows: int | None = None,
     source_frames: dict[str, pd.DataFrame] | None = None,
-    frame_cache: dict[tuple[Any, ...], pd.DataFrame] | None = None,
+    frame_cache: MutableMapping[tuple[Any, ...], pd.DataFrame] | None = None,
     frame_cache_namespace: tuple[Any, ...] | None = None,
+    data_usage_starts: dict | None = None,
 ) -> dict[str, pd.DataFrame]:
     from lib.feature_graph_v2 import build_feature_frames_from_cache_graph
 
@@ -1933,4 +2148,5 @@ def build_feature_frames_from_cache(
         source_frames=source_frames,
         frame_cache=frame_cache,
         frame_cache_namespace=frame_cache_namespace,
+        data_usage_starts=data_usage_starts,
     )

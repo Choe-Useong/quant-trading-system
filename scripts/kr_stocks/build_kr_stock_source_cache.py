@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RAW_DIR = ROOT / "data" / "kr_stocks" / "raw"
 DEFAULT_OUT_DIR = ROOT / "data" / "stocks_cache" / "kr_stock_daily"
 INDEX_PRICE_FILE = "index_price.parquet"
+DEFAULT_ETF_INDEX_RAW = ROOT / "data" / "kr_etfs" / "raw" / "ohlcv_pykrx.parquet"
 INDUSTRY_FREQUENCIES = {"monthly", "weekly", "daily"}
 
 MARCAP_VALUE_COLUMNS = {
@@ -53,6 +54,14 @@ def parse_args() -> argparse.Namespace:
         default="monthly",
         help="Raw KRX industry snapshot frequency.",
     )
+    parser.add_argument(
+        "--etf-index-columns",
+        default="",
+        help="Optional NAME=ETF_SYMBOL pairs added to index_price from the ETF raw index value, "
+        "for example KOSPI200=069500.",
+    )
+    parser.add_argument("--etf-index-raw", default=str(DEFAULT_ETF_INDEX_RAW))
+    parser.add_argument("--etf-index-value-column", default="IndexValue")
     return parser.parse_args()
 
 
@@ -251,6 +260,52 @@ def _build_market_meta(marcap: pd.DataFrame, columns: pd.Index) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _parse_etf_index_columns(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in [part.strip() for part in str(raw or "").split(",") if part.strip()]:
+        name, separator, symbol = item.partition("=")
+        name, symbol = name.strip().upper(), symbol.strip()
+        if not separator or not name or not symbol or name in mapping:
+            raise ValueError(f"Invalid --etf-index-columns item: {item}")
+        mapping[name] = _normalize_code(symbol)
+    return mapping
+
+
+def _load_etf_index_columns(
+    path: Path, mapping: dict[str, str], value_column: str, index: pd.DatetimeIndex,
+) -> tuple[pd.DataFrame, dict[str, dict]]:
+    """Index values published with ETF prices (e.g. pykrx IndexValue), aligned to cache dates.
+
+    Missing cache dates stay NaN; nothing is forward-filled.
+    """
+    if not path.exists():
+        raise FileNotFoundError(path)
+    raw = pd.read_parquet(path, columns=["Date", "Symbol", value_column])
+    raw["Symbol"] = raw["Symbol"].map(_normalize_code)
+    columns, sources = {}, {}
+    for name, symbol in mapping.items():
+        rows = raw[raw["Symbol"].eq(symbol)]
+        if rows.empty:
+            raise ValueError(f"ETF index source has no rows for symbol {symbol}")
+        values = pd.Series(pd.to_numeric(rows[value_column], errors="coerce").to_numpy(),
+                           index=pd.to_datetime(rows["Date"]).dt.normalize())
+        if values.index.duplicated().any():
+            raise ValueError(f"ETF index source has duplicate dates for symbol {symbol}")
+        if ((values <= 0) & values.notna()).any():
+            raise ValueError(f"ETF index source has non-positive values for symbol {symbol}")
+        aligned = values.sort_index().reindex(index)
+        columns[name] = aligned
+        observed = aligned.dropna()
+        sources[name] = {
+            "source": str(path), "symbol": symbol, "value_column": value_column,
+            "kind": "price index as published with the ETF quote; dividends not included",
+            "first_value_date": observed.index.min().date().isoformat() if not observed.empty else None,
+            "missing_cache_dates_after_first_value": int(aligned.loc[observed.index.min():].isna().sum())
+            if not observed.empty else None,
+        }
+    return pd.DataFrame(columns, index=index), sources
+
+
 def _write_report(
     out_dir: Path,
     *,
@@ -259,6 +314,7 @@ def _write_report(
     frames: dict[str, pd.DataFrame],
     industry_frequency: str | None,
     industry_labels: pd.DataFrame | None,
+    index_sources: dict[str, dict] | None = None,
 ) -> None:
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -277,6 +333,7 @@ def _write_report(
             if industry_labels is not None
             else None
         ),
+        "index_sources": index_sources or {},
         "frames": {
             name: {
                 "rows": int(frame.shape[0]),
@@ -346,6 +403,16 @@ def main() -> int:
         index_price = _load_index_price(index_price_path, args.start, args.end)
         if not index_price.empty:
             frames["index_price"] = index_price.reindex(index=close.index)
+    index_sources = None
+    etf_index_columns = _parse_etf_index_columns(args.etf_index_columns)
+    if etf_index_columns:
+        extra, index_sources = _load_etf_index_columns(
+            _resolve(args.etf_index_raw), etf_index_columns, args.etf_index_value_column, close.index)
+        existing = frames.get("index_price")
+        if existing is not None and set(existing.columns) & set(extra.columns):
+            raise ValueError(f"index_price already has columns: {sorted(set(existing.columns) & set(extra.columns))}")
+        combined = extra if existing is None else pd.concat([existing, extra], axis=1)
+        frames["index_price"] = combined.reindex(columns=sorted(combined.columns))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, frame in frames.items():
@@ -371,6 +438,7 @@ def main() -> int:
         frames=frames,
         industry_frequency=args.industry_frequency if args.include_industry else None,
         industry_labels=industry_labels,
+        index_sources=index_sources,
     )
 
     print(f"Wrote Korean stock source cache to {out_dir}")

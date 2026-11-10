@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
+from numba import njit, prange
 
 from lib.specs import FilterStageSpec, RankFilterSpec, UniverseSpec, ValueFilterSpec
+from lib.dataframes import CACHE_ELIGIBILITY_FRAME
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,37 @@ class UniverseV2Result:
 
 
 RankCache = dict[tuple[object, ...], pd.DataFrame]
+ENTRY_ELIGIBILITY_FRAME = "__universe_entry_eligible__"
+
+
+def validate_holding_selection_config(universe: UniverseSpec, weight, backtest: dict) -> None:
+    """Keep the optional target holding clock ahead of allocation and execution."""
+    if universe.holding is None:
+        return
+    if weight.weighting != "fixed" or weight.position_score_feature is not None:
+        raise ValueError("universe.holding requires fixed weighting without position_score_feature")
+    if weight.fixed_weight is None or not np.isfinite(weight.fixed_weight) or weight.fixed_weight == 0:
+        raise ValueError("universe.holding requires a finite nonzero fixed_weight")
+    frequency = str(weight.rebalance_frequency).strip().lower().replace("-", "_")
+    if frequency not in {"every_bar", "change_only"} or weight.gross_exposure_update_frequency:
+        raise ValueError("universe.holding requires every_bar/change_only allocation without a separate exposure schedule")
+    if backtest.get("numba_futures", {}).get("max_holding_hours") is not None:
+        raise ValueError("universe.holding cannot be combined with numba_futures.max_holding_hours")
+
+
+def holding_selection_start(backtest: dict, *, eval_start=None, trim_start_mode=None):
+    """Warm indicators on the prefix, but start the target book with the account."""
+    start = pd.to_datetime(eval_start, utc=True) if eval_start is not None else None
+    mode = backtest.get("trim_start_mode", "none") if trim_start_mode is None else trim_start_mode
+    if mode == "timestamp":
+        configured = backtest.get("trim_start_timestamp")
+        if configured is None:
+            raise ValueError("trim_start_mode='timestamp' requires trim_start_timestamp")
+        configured = pd.to_datetime(configured, utc=True)
+        if pd.isna(configured):
+            raise ValueError("Invalid holding trim_start_timestamp")
+        start = configured if start is None else max(start, configured)
+    return start
 
 
 def _age_days_from_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -123,6 +156,8 @@ def _effective_universe_spec(spec: UniverseSpec) -> UniverseSpec:
         rank_filters=effective_rank_filters,
         filter_stages=effective_filter_stages,
         name=spec.name,
+        holding=(replace(spec.holding, exit_lag=spec.holding.exit_lag + int(spec.signal_lag or 0))
+                 if spec.holding is not None else None),
     )
 
 
@@ -172,6 +207,42 @@ def _value_filter_signature(value_filter: ValueFilterSpec) -> tuple[object, ...]
     )
 
 
+@njit(parallel=True, cache=True, fastmath=False)
+def _rank_rows_first_kernel(values: np.ndarray, ascending: bool) -> np.ndarray:
+    n_rows, n_cols = values.shape
+    out = np.full((n_rows, n_cols), np.nan)
+    for row in prange(n_rows):
+        columns = np.empty(n_cols, dtype=np.int64)
+        count = 0
+        for col in range(n_cols):
+            if not np.isnan(values[row, col]):
+                columns[count] = col
+                count += 1
+        if count == 0:
+            continue
+        keys = np.empty(count)
+        for k in range(count):
+            value = values[row, columns[k]]
+            keys[k] = value if ascending else -value
+        # Stable sort: equal values keep column order, as pandas method="first".
+        order = np.argsort(keys, kind="mergesort")
+        for k in range(count):
+            out[row, columns[order[k]]] = k + 1.0
+    return out
+
+
+def rank_rows_first(frame: pd.DataFrame, *, ascending: bool) -> pd.DataFrame:
+    """Row-wise rank equal to frame.rank(axis=1, method="first", ascending=...).
+
+    NaN stays NaN; ties rank by column order in both directions.
+    """
+    if frame.shape[1] == 0 or not all(pd.api.types.is_numeric_dtype(dtype) for dtype in frame.dtypes):
+        return frame.rank(axis=1, method="first", ascending=ascending)
+    values = np.ascontiguousarray(frame.to_numpy(dtype=np.float64, na_value=np.nan))
+    ranks = _rank_rows_first_kernel(values, bool(ascending))
+    return pd.DataFrame(ranks, index=frame.index, columns=frame.columns)
+
+
 def _rank_frame(
     scoped: pd.DataFrame,
     *,
@@ -183,7 +254,7 @@ def _rank_frame(
         cached = rank_cache.get(cache_key)
         if cached is not None:
             return cached
-    ranks = scoped.rank(axis=1, method="first", ascending=ascending)
+    ranks = rank_rows_first(scoped, ascending=ascending)
     if rank_cache is not None and cache_key is not None:
         rank_cache[cache_key] = ranks
     return ranks
@@ -343,6 +414,63 @@ def _apply_filter_stage(
     raise ValueError(f"Unsupported filter stage mode: {stage.mode}")
 
 
+def _holding_selection_frame(candidates, eligible, scores, exits, spec, selection_start):
+    """Select targets causally; no fill/account state and no persistent candidate queue."""
+    index, columns = scores.index, scores.columns
+    if not isinstance(index, pd.DatetimeIndex) or not index.is_unique or not index.is_monotonic_increasing or index.hasnans:
+        raise ValueError("universe.holding requires ordered unique datetime rows")
+    if not columns.is_unique:
+        raise ValueError("universe.holding requires unique market columns")
+
+    def aligned_values(frame, dtype):
+        if not frame.index.equals(index) or not frame.columns.equals(columns):
+            frame = frame.reindex(index=index, columns=columns)
+        return frame.to_numpy(dtype=dtype, copy=False, na_value=False if dtype is bool else np.nan)
+
+    values = scores.to_numpy(dtype=float)
+    exit_values = aligned_values(exits, float)
+    candidate_values = aligned_values(candidates, bool)
+    eligible_values = aligned_values(eligible, bool)
+    names = columns.astype(str).to_numpy()
+    if len(set(names)) != len(names):
+        raise ValueError("universe.holding requires unique string market identifiers")
+    start = 0
+    if selection_start is not None:
+        stamp = pd.to_datetime(selection_start, utc=True)
+        if pd.isna(stamp):
+            raise ValueError("Invalid holding selection_start")
+        start = int(pd.to_datetime(index, utc=True).searchsorted(stamp))
+    result = np.zeros(values.shape, dtype=bool)
+    blocked_until = np.zeros(len(columns), dtype=np.int64)
+    active: dict[int, int] = {}
+    holding = spec.holding
+    for row in range(start, len(index)):
+        # All exits precede entries, including across different markets.
+        for column, entered_at in list(active.items()):
+            expired = holding.max_holding_bars is not None and row - entered_at >= holding.max_holding_bars
+            value = exit_values[row, column]
+            if not expired and eligible_values[row, column] and not np.isfinite(value):
+                raise ValueError(f"Missing/nonfinite holding exit signal for {columns[column]} at {index[row]}")
+            if expired or not eligible_values[row, column] or value != 0.0:
+                del active[column]
+                blocked_until[column] = min(row + holding.cooldown_bars + 1, len(index))
+        slots = spec.top_n - len(active)
+        if slots > 0:
+            available = (candidate_values[row] & eligible_values[row] & np.isfinite(values[row])
+                         & np.isfinite(exit_values[row]) & (exit_values[row] == 0.0) & (blocked_until <= row))
+            if active:
+                available[list(active)] = False
+            choices = np.flatnonzero(available)
+            if len(choices):
+                priority = values[row, choices] if spec.ascending else -values[row, choices]
+                # Symbol is a deterministic tiebreaker, independent of column order.
+                choices = choices[np.lexsort((names[choices], priority))[:slots]]
+                active.update((int(column), row) for column in choices)
+        if active:
+            result[row, list(active)] = True
+    return pd.DataFrame(result, index=index, columns=columns)
+
+
 def build_universe_mask_v2(
     feature_frames: dict[str, pd.DataFrame],
     market_warning_frame: pd.DataFrame,
@@ -350,6 +478,7 @@ def build_universe_mask_v2(
     *,
     rank_cache: RankCache | None = None,
     rank_cache_namespace: tuple[object, ...] | None = None,
+    selection_start: pd.Timestamp | str | None = None,
 ) -> UniverseV2Result:
     effective_spec = _effective_universe_spec(spec)
     sort_column = effective_spec.sort_column or effective_spec.feature_column
@@ -360,8 +489,22 @@ def build_universe_mask_v2(
     index = sort_frame.index
 
     market_mask = _allowed_market_mask(columns, effective_spec)
-    market_mask_frame = pd.DataFrame([market_mask.to_numpy(dtype=bool)] * len(index), index=index, columns=columns)
+    market_mask_frame = pd.DataFrame(
+        np.broadcast_to(market_mask.to_numpy(dtype=bool), (len(index), len(columns))).copy(),
+        index=index,
+        columns=columns,
+    )
+    # Data/lifecycle eligibility is a holding boundary. Entry screens, missing
+    # ranks and value filters must not silently liquidate an existing target.
+    holding_eligible = market_mask_frame
     base = sort_frame.notna() & market_mask_frame
+    if CACHE_ELIGIBILITY_FRAME in feature_frames:
+        usage = feature_frames[CACHE_ELIGIBILITY_FRAME].reindex(index=index, columns=columns).eq(True)
+        base &= usage
+        if effective_spec.holding is not None:
+            holding_eligible = holding_eligible & usage
+    if effective_spec.holding is not None and ENTRY_ELIGIBILITY_FRAME in feature_frames:
+        base &= feature_frames[ENTRY_ELIGIBILITY_FRAME].reindex(index=index, columns=columns).eq(True)
 
     if effective_spec.exclude_warnings and not market_warning_frame.empty:
         warning_frame = market_warning_frame.reindex(index=index, columns=columns)
@@ -397,12 +540,18 @@ def build_universe_mask_v2(
         tuple(effective_spec.allowed_markets),
         tuple(effective_spec.excluded_markets),
     )
+    if effective_spec.holding is not None:
+        # Holding entry validation rejects nonfinite filter values; ranks for
+        # the old snapshot policy must not be reused for this different mask.
+        base_key += ("holding_entry",)
     candidates_key: tuple[object, ...] = ("candidates", base_key)
     for value_filter in effective_spec.value_filters:
         if value_filter.feature_column not in feature_frames:
             raise ValueError(f"Missing value filter feature for frame_v2 universe: {value_filter.feature_column}")
         value_frame = _shift_frame(feature_frames[value_filter.feature_column], value_filter.lag)
         candidates &= _compare_frame(value_filter.operator, value_frame, float(value_filter.value)).fillna(False)
+        if effective_spec.holding is not None:
+            candidates &= np.isfinite(value_frame)
         candidates_key = ("value_filter", candidates_key, _value_filter_signature(value_filter))
 
     for stage in effective_spec.filter_stages:
@@ -416,6 +565,15 @@ def build_universe_mask_v2(
             rank_cache=rank_cache,
             rank_cache_namespace=rank_cache_namespace,
         )
+
+    if effective_spec.holding is not None:
+        name = effective_spec.holding.exit_feature
+        if name not in feature_frames:
+            raise ValueError(f"Missing holding exit feature: {name}")
+        exits = _shift_frame(feature_frames[name], effective_spec.holding.exit_lag)
+        selection = _holding_selection_frame(candidates, holding_eligible, sort_frame, exits,
+                                             effective_spec, selection_start)
+        return UniverseV2Result(selection_mask=selection, base_eligible_mask=base)
 
     selection = _apply_final_selection(
         candidates,

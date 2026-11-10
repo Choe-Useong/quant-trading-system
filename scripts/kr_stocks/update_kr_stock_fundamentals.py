@@ -14,19 +14,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from zipfile import ZipFile
+
+import gzip
+import sys
 
 import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.kr_stocks.dart_xbrl import (  # noqa: E402
+    ANNUAL_REPORT_CODE,
+    XBRL_ITEM_COLUMNS,
+    annual_filing_versions,
+    instance_from_zip,
+    parse_annual_instance,
+)
+
 DEFAULT_RAW_DIR = ROOT / "data" / "kr_stocks" / "raw"
 DEFAULT_CLOSE_FILE = DEFAULT_RAW_DIR / "close_fdr.parquet"
 
 DART_CORP_CODE_URL = "https://opendart.fss.or.kr/api/corpCode.xml"
 DART_COMPANY_URL = "https://opendart.fss.or.kr/api/company.json"
 DART_LIST_URL = "https://opendart.fss.or.kr/api/list.json"
+DART_XBRL_URL = "https://opendart.fss.or.kr/api/fnlttXbrl.xml"
 DATA_GO_SUMMARY_URL = (
     "https://apis.data.go.kr/1160100/service/"
     "GetFinaStatInfoService_V2/getSummFinaStat_V2"
@@ -52,7 +67,30 @@ COMPANY_PROFILE_FILE = "fundamental_company_profiles.parquet"
 INDUSTRY_MAP_FILE = "fundamental_industry_map.parquet"
 STOCK_ISSUANCE_FILE = "fundamental_stock_issuance_disclosures.parquet"
 STOCK_DIVIDEND_FILE = "fundamental_stock_dividends.parquet"
+XBRL_VALUES_FILE = "fundamental_xbrl_values.parquet"
+XBRL_INSTANCE_DIR = "fundamental_xbrl_instances"
 REPORT_FILE = "fundamental_download_report.json"
+
+XBRL_VALUE_COLUMNS = [
+    "rcept_no",
+    "corp_code",
+    "period_ym",
+    "basDt",
+    "statement",
+    *XBRL_ITEM_COLUMNS,
+    "tags",
+    "status",
+    "fetched_at",
+]
+# Summary items whose absence on a final filing is worth an XBRL lookup.
+XBRL_FILL_SUMMARY_COLUMNS = {
+    "enpBzopPft",
+    "enpCrtmNpf",
+    "iclsPalClcAmt",
+    "enpTastAmt",
+    "enpTdbtAmt",
+    "enpTcptAmt",
+}
 
 DISCLOSURE_COLUMNS = [
     "corp_cls",
@@ -320,6 +358,34 @@ def parse_args() -> argparse.Namespace:
             "Download and validate only stock-dividend history without "
             "calling OpenDART or rebuilding the other fundamental inputs."
         ),
+    )
+    parser.add_argument(
+        "--include-xbrl-versions",
+        action="store_true",
+        help=(
+            "After the summary update, download annual-report XBRL for earlier "
+            "filing versions of corrected periods and for final filings with "
+            "missing summary items (used by the cache build --use-xbrl-versions)."
+        ),
+    )
+    parser.add_argument(
+        "--xbrl-versions-only",
+        action="store_true",
+        help=(
+            "Download only the annual-report XBRL targets from the existing raw "
+            "corp map, disclosures and summary."
+        ),
+    )
+    parser.add_argument(
+        "--xbrl-max-requests-per-run",
+        type=int,
+        default=8000,
+        help="OpenDART request cap for XBRL downloads in one run.",
+    )
+    parser.add_argument(
+        "--reparse-xbrl",
+        action="store_true",
+        help="Re-parse stored XBRL instances (no API calls) before downloading.",
     )
     return parser.parse_args()
 
@@ -834,6 +900,276 @@ def _update_stock_dividend_report(
     _atomic_write_json(report, report_path)
 
 
+class OpenDartLimitReached(RuntimeError):
+    """OpenDART returned status 020 (request limit exceeded)."""
+
+
+# Statuses stored permanently; anything else is retried on the next run.
+XBRL_FINAL_STATUSES = {"ok", "no_data", "no_file", "invalid_zip", "parse_error", "no_statement"}
+
+
+def _summary_periods_for_xbrl(corp_map: pd.DataFrame, summary: pd.DataFrame) -> pd.DataFrame:
+    """Company periods present in the summary, with the statement the cache build selects."""
+    columns = ["crno", "bizYear", "basDt", "fnclDcd", *sorted(XBRL_FILL_SUMMARY_COLUMNS)]
+    missing = set(columns) - set(summary.columns)
+    if missing:
+        raise ValueError(f"Financial summary cache is missing columns: {sorted(missing)}")
+    selected = summary[columns].copy()
+    for column in columns:
+        selected[column] = selected[column].fillna("").astype(str).str.strip()
+    selected = selected[selected["fnclDcd"].isin({"110", "120"})].copy()
+    selected["basDt"] = selected["basDt"].str.replace(r"\D", "", regex=True)
+    selected = selected[selected["basDt"].str.len().eq(8) & selected["crno"].astype(bool)].copy()
+    selected["statement_preference"] = selected["fnclDcd"].map({"110": 0, "120": 1})
+    selected = selected.sort_values(
+        ["crno", "bizYear", "basDt", "statement_preference"]
+    ).drop_duplicates(["crno", "bizYear", "basDt"], keep="first")
+    mapping = corp_map[["corp_code", "jurir_no"]].copy()
+    for column in mapping.columns:
+        mapping[column] = mapping[column].fillna("").astype(str).str.strip()
+    mapping = mapping[mapping["corp_code"].astype(bool) & mapping["jurir_no"].astype(bool)]
+    mapping = mapping.drop_duplicates("jurir_no", keep="last")
+    selected = selected.merge(mapping, left_on="crno", right_on="jurir_no", how="inner")
+    selected["period_ym"] = selected["basDt"].str.slice(0, 6)
+    summary_missing = pd.Series(False, index=selected.index)
+    for column in XBRL_FILL_SUMMARY_COLUMNS:
+        text = selected[column].str.replace(",", "", regex=False).str.replace(
+            r"^\((.*)\)$", r"\1", regex=True
+        )
+        number = pd.to_numeric(text, errors="coerce")
+        summary_missing |= number.isna() | number.eq(0.0)
+    selected["summary_missing"] = summary_missing
+    return selected.drop_duplicates(["corp_code", "period_ym"], keep="first")[
+        ["corp_code", "period_ym", "basDt", "fnclDcd", "summary_missing"]
+    ]
+
+
+def _xbrl_targets(
+    corp_map: pd.DataFrame, disclosures: pd.DataFrame, summary: pd.DataFrame
+) -> pd.DataFrame:
+    """Annual filings whose XBRL is needed by the versioned cache build.
+
+    earlier_version: every filing before the final one of a period (original
+    and intermediate corrections); the final values come from the summary.
+    final_missing_items: the final filing when the summary has a missing or
+    zero item among XBRL_FILL_SUMMARY_COLUMNS.
+    """
+    versions = annual_filing_versions(disclosures)
+    periods = _summary_periods_for_xbrl(corp_map, summary)
+    merged = versions.merge(periods, on=["corp_code", "period_ym"], how="inner")
+    wanted = ~merged["is_final"] | merged["summary_missing"]
+    targets = merged[wanted].copy()
+    targets["reason"] = targets["is_final"].map(
+        {False: "earlier_version", True: "final_missing_items"}
+    )
+    return targets[["rcept_no", "corp_code", "period_ym", "basDt", "reason"]].reset_index(drop=True)
+
+
+def _dart_payload_status(payload: bytes) -> str:
+    text = payload.decode("utf-8", errors="replace").strip()
+    try:
+        return str(json.loads(text).get("status", ""))
+    except (ValueError, AttributeError):
+        pass
+    try:
+        return str(ET.fromstring(text).findtext("status") or "")
+    except ET.ParseError:
+        return ""
+
+
+def _fetch_xbrl_instance(
+    client: HttpClient, key: str, rcept_no: str
+) -> tuple[str, bytes | None]:
+    payload = client.get_bytes(
+        DART_XBRL_URL,
+        {"crtfc_key": key, "rcept_no": rcept_no, "reprt_code": ANNUAL_REPORT_CODE},
+    )
+    if payload[:2] == b"PK":
+        instance = instance_from_zip(payload)
+        return ("ok", instance) if instance is not None else ("invalid_zip", None)
+    status = _dart_payload_status(payload)
+    if status == "020":
+        raise OpenDartLimitReached("OpenDART request limit exceeded (status 020)")
+    if status == "013":
+        return "no_data", None
+    if status == "014":
+        return "no_file", None
+    raise RuntimeError(f"OpenDART fnlttXbrl status {status or 'unknown'} for {rcept_no}")
+
+
+def _xbrl_rows(target: dict, status: str, instance: bytes | None, fetched_at: str) -> list[dict]:
+    base = {
+        "rcept_no": target["rcept_no"],
+        "corp_code": target["corp_code"],
+        "period_ym": target["period_ym"],
+        "basDt": target["basDt"],
+        "fetched_at": fetched_at,
+    }
+    if status != "ok" or instance is None:
+        return [{**base, "statement": "", "status": status}]
+    try:
+        parsed = parse_annual_instance(instance, target["basDt"])
+    except (ET.ParseError, ValueError):
+        return [{**base, "statement": "", "status": "parse_error"}]
+    if not parsed:
+        return [{**base, "statement": "", "status": "no_statement"}]
+    rows = []
+    for statement, values in sorted(parsed.items()):
+        row = {**base, "statement": statement, "status": "ok"}
+        for column in XBRL_ITEM_COLUMNS:
+            row[column] = values[column][0] if column in values else None
+        row["tags"] = json.dumps(
+            {column: tag for column, (_, tag) in values.items()}, sort_keys=True
+        )
+        rows.append(row)
+    return rows
+
+
+def _normalize_xbrl_values(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.reindex(columns=XBRL_VALUE_COLUMNS).copy()
+    for column in XBRL_VALUE_COLUMNS:
+        if column in XBRL_ITEM_COLUMNS:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("float64")
+        else:
+            out[column] = out[column].fillna("").astype(str)
+    return out.sort_values(["rcept_no", "statement"]).reset_index(drop=True)
+
+
+def _xbrl_stats(targets: pd.DataFrame, values: pd.DataFrame) -> dict[str, object]:
+    per_filing = values.drop_duplicates("rcept_no")
+    covered = targets["rcept_no"].isin(set(values["rcept_no"]))
+    return {
+        "targets": int(len(targets)),
+        "targets_by_reason": {
+            str(key): int(count) for key, count in targets["reason"].value_counts().items()
+        },
+        "targets_done": int(covered.sum()),
+        "targets_pending": int((~covered).sum()),
+        "filings_by_status": {
+            str(key): int(count) for key, count in per_filing["status"].value_counts().items()
+        },
+        "ok_statement_rows": int(values["status"].eq("ok").sum()),
+    }
+
+
+def _update_xbrl_versions(
+    *,
+    client: HttpClient,
+    dart_key: str,
+    raw_dir: Path,
+    corp_map: pd.DataFrame,
+    disclosures: pd.DataFrame,
+    summary: pd.DataFrame,
+    workers: int,
+    checkpoint_every: int,
+    reparse: bool,
+) -> dict[str, object]:
+    """Download and parse annual-report XBRL needed for versioned fundamentals.
+
+    Instances are kept gzip-compressed so the parser can be re-run (reparse)
+    without API calls. Filings already stored with a final status are skipped.
+    """
+    values_path = raw_dir / XBRL_VALUES_FILE
+    instance_dir = raw_dir / XBRL_INSTANCE_DIR
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    targets = _xbrl_targets(corp_map, disclosures, summary)
+    target_records = {row["rcept_no"]: row for row in targets.to_dict("records")}
+    existing = (
+        _normalize_xbrl_values(pd.read_parquet(values_path))
+        if values_path.exists()
+        else _normalize_xbrl_values(pd.DataFrame(columns=XBRL_VALUE_COLUMNS))
+    )
+    existing = existing[existing["status"].isin(XBRL_FINAL_STATUSES)]
+
+    if reparse:
+        reparsed: list[dict] = []
+        for rcept_no, target in target_records.items():
+            path = instance_dir / f"{rcept_no}.xbrl.gz"
+            if path.exists():
+                reparsed.extend(
+                    _xbrl_rows(target, "ok", gzip.decompress(path.read_bytes()), "reparsed")
+                )
+        reparsed_frame = _normalize_xbrl_values(pd.DataFrame(reparsed, columns=XBRL_VALUE_COLUMNS))
+        existing = pd.concat(
+            [existing[~existing["rcept_no"].isin(set(reparsed_frame["rcept_no"]))], reparsed_frame],
+            ignore_index=True,
+        )
+        print(f"xbrl reparsed filings: {reparsed_frame['rcept_no'].nunique()}")
+
+    done = set(existing["rcept_no"])
+    pending = [target_records[r] for r in targets["rcept_no"] if r not in done]
+    print(f"xbrl targets: {len(targets)} done: {len(done & set(target_records))} pending: {len(pending)}")
+
+    new_rows: list[dict] = []
+    stop_reason = ""
+    stop = Event()
+    rows_lock = Lock()
+
+    def fetch(target: dict) -> list[dict] | None:
+        if stop.is_set():
+            return None
+        status, instance = _fetch_xbrl_instance(client, dart_key, target["rcept_no"])
+        if instance is not None:
+            (instance_dir / f"{target['rcept_no']}.xbrl.gz").write_bytes(gzip.compress(instance))
+        return _xbrl_rows(target, status, instance, datetime.now().isoformat(timespec="seconds"))
+
+    def checkpoint() -> None:
+        with rows_lock:
+            frame = pd.concat(
+                [existing, _normalize_xbrl_values(pd.DataFrame(new_rows, columns=XBRL_VALUE_COLUMNS))],
+                ignore_index=True,
+            )
+        _atomic_write_parquet(_normalize_xbrl_values(frame), values_path)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(int(workers), 1)) as executor:
+        futures = [executor.submit(fetch, target) for target in pending]
+        for future in as_completed(futures):
+            try:
+                rows = future.result()
+            except OpenDartLimitReached as exc:
+                stop.set()
+                stop_reason = str(exc)
+                continue
+            except RuntimeError as exc:
+                if "request limit reached" in str(exc):
+                    stop.set()
+                    stop_reason = str(exc)
+                    continue
+                print(f"xbrl fetch failed (retried next run): {exc}")
+                continue
+            if rows is None:
+                continue
+            with rows_lock:
+                new_rows.extend(rows)
+            completed += 1
+            if checkpoint_every > 0 and completed % checkpoint_every == 0:
+                checkpoint()
+                print(f"xbrl checkpoint: {completed}/{len(pending)}")
+    checkpoint()
+    values = _normalize_xbrl_values(pd.read_parquet(values_path))
+    stats = _xbrl_stats(targets, values)
+    stats["fetched_this_run"] = completed
+    stats["stop_reason"] = stop_reason
+    print(f"saved: {values_path} filings={values['rcept_no'].nunique()}")
+    print("xbrl_versions:", stats)
+    return stats
+
+
+def _update_xbrl_report(*, raw_dir: Path, stats: dict, request_count: int) -> None:
+    report_path = raw_dir / REPORT_FILE
+    if report_path.exists():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    else:
+        report = {"created_at": datetime.now().isoformat(timespec="seconds")}
+    report["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    report["xbrl_versions"] = {**stats, "api_requests_this_run": int(request_count)}
+    outputs = report.setdefault("outputs", {})
+    outputs["xbrl_values"] = str(raw_dir / XBRL_VALUES_FILE)
+    outputs["xbrl_instances"] = str(raw_dir / XBRL_INSTANCE_DIR)
+    _atomic_write_json(report, report_path)
+
+
 def _parse_codes(raw: str) -> set[str] | None:
     codes = {_normalize_code(value) for value in str(raw).split(",") if value.strip()}
     return codes or None
@@ -944,6 +1280,12 @@ def _load_or_download_corp_code_map(
     downloaded.to_parquet(cache_path, index=False)
     print(f"saved: {cache_path} rows={len(downloaded)}")
     return downloaded
+
+
+def _required_raw(path: Path) -> Path:
+    if not path.exists():
+        raise FileNotFoundError(f"Required raw file is missing: {path}")
+    return path
 
 
 def _read_existing(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
@@ -1585,10 +1927,48 @@ def main() -> int:
     _load_env()
     raw_dir = _resolve(args.raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    if args.stock_issuance_only and args.dividends_only:
+    if (
+        int(bool(args.stock_issuance_only))
+        + int(bool(args.dividends_only))
+        + int(bool(args.xbrl_versions_only))
+    ) > 1:
         raise ValueError(
-            "--stock-issuance-only and --dividends-only cannot be used together"
+            "--stock-issuance-only, --dividends-only and --xbrl-versions-only "
+            "cannot be used together"
         )
+    if args.xbrl_versions_only:
+        dart_key = _required_env("OPENDART_API_KEY")
+        xbrl_client = HttpClient(
+            timeout=args.timeout_seconds,
+            retries=args.request_retries,
+            sleep_seconds=args.request_sleep_seconds,
+            max_requests_per_minute=args.dart_max_requests_per_minute,
+            max_requests=args.xbrl_max_requests_per_run,
+            service_name="OpenDART",
+        )
+        print(
+            "OpenDART XBRL limits: "
+            f"{args.dart_max_requests_per_minute:g}/minute, "
+            f"{args.xbrl_max_requests_per_run}/run"
+        )
+        xbrl_stats = _update_xbrl_versions(
+            client=xbrl_client,
+            dart_key=dart_key,
+            raw_dir=raw_dir,
+            corp_map=_read_existing(_required_raw(raw_dir / CORP_MAP_FILE)),
+            disclosures=_read_existing(
+                _required_raw(raw_dir / DISCLOSURE_FILE), DISCLOSURE_COLUMNS
+            ),
+            summary=_read_existing(_required_raw(raw_dir / SUMMARY_FILE), SUMMARY_COLUMNS),
+            workers=args.max_workers,
+            checkpoint_every=args.checkpoint_every,
+            reparse=args.reparse_xbrl,
+        )
+        _update_xbrl_report(
+            raw_dir=raw_dir, stats=xbrl_stats, request_count=xbrl_client.request_count
+        )
+        print(f"saved: {raw_dir / REPORT_FILE}")
+        return 0
     stock_issuance_start_year = int(args.stock_issuance_start_year)
     stock_issuance_end_year = int(
         args.stock_issuance_end_year or pd.Timestamp.today().year
@@ -1851,6 +2231,30 @@ def main() -> int:
         summary.to_parquet(raw_dir / SUMMARY_FILE, index=False)
         print(f"saved: {raw_dir / SUMMARY_FILE} rows={len(summary)}")
 
+    xbrl_stats: dict[str, object] | None = None
+    xbrl_request_count = 0
+    if args.include_xbrl_versions:
+        xbrl_client = HttpClient(
+            timeout=args.timeout_seconds,
+            retries=args.request_retries,
+            sleep_seconds=args.request_sleep_seconds,
+            max_requests_per_minute=args.dart_max_requests_per_minute,
+            max_requests=args.xbrl_max_requests_per_run,
+            service_name="OpenDART",
+        )
+        xbrl_stats = _update_xbrl_versions(
+            client=xbrl_client,
+            dart_key=dart_key,
+            raw_dir=raw_dir,
+            corp_map=full_corp_map,
+            disclosures=disclosures,
+            summary=summary,
+            workers=args.max_workers,
+            checkpoint_every=args.checkpoint_every,
+            reparse=args.reparse_xbrl,
+        )
+        xbrl_request_count = xbrl_client.request_count
+
     existing_profiles = _read_existing(
         raw_dir / COMPANY_PROFILE_FILE, COMPANY_PROFILE_COLUMNS
     )
@@ -1902,6 +2306,10 @@ def main() -> int:
             raw_dir=raw_dir,
             stats=stock_dividend_stats,
             request_count=stock_dividend_request_count,
+        )
+    if xbrl_stats is not None:
+        _update_xbrl_report(
+            raw_dir=raw_dir, stats=xbrl_stats, request_count=xbrl_request_count
         )
     print(f"saved: {raw_dir / REPORT_FILE}")
     print(

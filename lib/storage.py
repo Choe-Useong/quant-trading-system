@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -10,6 +12,26 @@ from lib.upbit_collector import CandleRow, Market
 
 
 CSV_ENCODING = "utf-8-sig"
+
+
+def replace_file(source: Path | str, target: Path | str, *, attempts: int = 6, first_delay: float = 0.1) -> None:
+    """Atomic os.replace that retries briefly when Windows denies access.
+
+    On Windows a target held open by another process (antivirus scan, search
+    indexer, a concurrent reader) makes os.replace fail with PermissionError.
+    The replace stays atomic; only that transient denial is retried with
+    doubling delays (0.1 + 0.2 + 0.4 + 0.8 + 1.6 s by default), then raised.
+    """
+    delay = first_delay
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 MARKET_COLUMNS = ["market", "korean_name", "english_name", "market_warning"]
 CANDLE_COLUMNS = [
     "market",

@@ -1,0 +1,5 @@
+# Optional research backtest engine; existing spot/live installations need only requirements.txt.
+-r requirements.txt
+freqtrade==2026.9
+# CCXT's tested cffi pin requires the compatible curl-cffi used by yfinance.
+curl-cffi==0.16.3

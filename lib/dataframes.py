@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
+from functools import lru_cache
+import json
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +10,163 @@ import pandas as pd
 
 
 CSV_ENCODING = "utf-8-sig"
+CACHE_ELIGIBILITY_FRAME = "__cache_eligible__"
+
+
+@lru_cache(maxsize=4)
+def _cache_data_starts(path: str, mtime_ns: int, size: int):
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    policy = payload.get("data_usage_policy")
+    records = payload.get("records", {})
+    if policy is None and not any(r.get("data_usage_basis") == "observed_prices"
+                                  or (r.get("lifecycle_verified", True) and r.get("known_end_exclusive_utc"))
+                                  for r in records.values()):
+        return None
+    if policy not in {None, "exclude_incomplete_prefix"}:
+        raise ValueError("Unsupported cache data_usage_policy")
+    starts = {}
+    for market, record in records.items():
+        observed = not record.get("lifecycle_verified", True)
+        value = (record["data_start_inclusive"] if policy else record.get("data_start_inclusive")
+                 if observed else record["active_bar_start_inclusive"])
+        stamp = pd.Timestamp(value) if value is not None else None
+        ending = record.get("data_end_exclusive")
+        if stamp is not None and not observed and record.get("known_end_exclusive_utc"):
+            # The collector excludes an incomplete terminal candle. Its active
+            # end is bounded by the sourced termination time and cache period.
+            bounds = [pd.to_datetime(record["active_bar_end_exclusive"], utc=True),
+                      pd.to_datetime(record["known_end_exclusive_utc"], utc=True)]
+            if ending is not None:
+                bounds.append(pd.to_datetime(ending, utc=True))
+            ending = min(bounds)
+        ending = pd.Timestamp(ending) if ending is not None else None
+        if stamp is not None:
+            stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+            lower, upper = (pd.Timestamp(record[key]) for key in ("active_bar_start_inclusive", "active_bar_end_exclusive"))
+            if (pd.isna(stamp) or not lower <= stamp < upper
+                    or (observed and (record.get("data_usage_basis") != "observed_prices" or ending is None))):
+                raise ValueError(f"Invalid cache data start: {market}")
+            if ending is not None:
+                ending = ending.tz_localize("UTC") if ending.tzinfo is None else ending.tz_convert("UTC")
+                if pd.isna(ending) or not stamp < ending <= upper:
+                    raise ValueError(f"Invalid cache data end: {market}")
+        elif ending is not None:
+            raise ValueError(f"Cache data end without a start: {market}")
+        starts[market] = (stamp, ending)
+    return starts
+
+
+def cache_data_usage_mask(cache_dir: Path, index, markets, *, data_usage_starts=None) -> pd.DataFrame | None:
+    """Explicit research coverage, separate from the exchange listing history."""
+    path = Path(cache_dir) / "instruments.json"
+    starts = None
+    if path.is_file():
+        stat = path.stat()
+        starts = _cache_data_starts(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    if starts is None and not data_usage_starts:
+        return None
+    dates = pd.DatetimeIndex(pd.to_datetime(index, utc=True))
+    columns = pd.Index(markets)
+    if dates.hasnans or (starts is not None and not set(columns) <= starts.keys()):
+        raise ValueError("Cache data usage metadata is missing requested markets or dates")
+    values = np.ones((len(dates), len(columns)), dtype=bool) if starts is None else np.zeros((len(dates), len(columns)), dtype=bool)
+    for column, market in enumerate(columns):
+        if starts is not None:
+            beginning, ending = starts[market]
+            if beginning is not None:
+                values[:, column] = dates >= beginning
+                if ending is not None:
+                    values[:, column] &= dates < ending
+        if data_usage_starts and market in data_usage_starts:
+            beginning = data_usage_starts[market]
+            if beginning is None:
+                values[:, column] = False
+            else:
+                beginning = pd.Timestamp(beginning)
+                beginning = beginning.tz_localize("UTC") if beginning.tzinfo is None else beginning.tz_convert("UTC")
+                values[:, column] &= dates >= beginning
+    result = pd.DataFrame(values, index=index, columns=columns)
+    result.attrs["data_usage_signature"] = (
+        tuple((market, *(s.value if s is not None else None for s in starts[market])) for market in columns) if starts is not None else (),
+        tuple((market, str(data_usage_starts[market])) for market in columns if data_usage_starts and market in data_usage_starts),
+    )
+    return result
+
+
+@lru_cache(maxsize=4)
+def _cache_instrument_records(path: str, mtime_ns: int, size: int):
+    return json.loads(Path(path).read_text(encoding="utf-8")).get("records", {})
+
+
+def cache_instrument_records(cache_dir: Path, markets) -> dict:
+    path = Path(cache_dir) / "instruments.json"
+    if not path.is_file():
+        return {}
+    stat = path.stat()
+    records = _cache_instrument_records(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    return {market: records[market] for market in markets if market in records}
+
+
+def cache_unverified_lifecycle_records(cache_dir: Path, markets) -> dict:
+    return {market: record for market, record in cache_instrument_records(cache_dir, markets).items()
+            if not record.get("lifecycle_verified", True)}
+
+
+@lru_cache(maxsize=4)
+def _funding_start_adjustments(cache_path: str, signature: tuple) -> dict:
+    cache = Path(cache_path)
+    manifest = json.loads((cache / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("cache_kind") != "archive_observed_futures":
+        return {}
+    candidates = {m: [i for i in issues if i["reason"] == "missing_funding"]
+                  for m, issues in manifest["quality_intervals"].items()}
+    records = cache_instrument_records(cache, candidates)
+    candidates = {m: issues for m, issues in candidates.items() if issues or not records.get(m, {}).get("lifecycle_verified", True)}
+    if not candidates:
+        return {}
+    rates = pd.read_parquet(cache / "funding_rate.parquet", columns=sorted(candidates))
+    rates.index = pd.to_datetime(rates.index, utc=True)
+    if rates.index.has_duplicates or not rates.index.is_monotonic_increasing:
+        raise ValueError("Funding observations require unique sorted timestamps")
+    result = {}
+    for market, issues in candidates.items():
+        record = records.get(market, {})
+        floor = record.get("data_start_inclusive") or record.get("active_bar_start_inclusive") or manifest["cache_start_inclusive"]
+        floor = pd.Timestamp(floor)
+        floor = floor.tz_localize("UTC") if floor.tzinfo is None else floor.tz_convert("UTC")
+        upper = pd.to_datetime(record.get("data_end_exclusive") or record.get("active_bar_end_exclusive")
+                               or manifest["cache_end_exclusive"], utc=True)
+        series = rates.loc[(rates.index >= floor) & (rates.index < upper), market]
+        actual = series.index[np.isfinite(series.to_numpy(dtype=float))]
+        first = actual[0] if len(actual) else None
+        prefix = [i for i in issues if pd.to_datetime(i["end_exclusive"], utc=True) > floor
+                  and (first is None or pd.to_datetime(i["start_inclusive"], utc=True) < first)]
+        if not prefix and not record.get("lifecycle_verified", True):
+            from lib.funding_schedule_v2 import funding_settlement_index
+            if first is None:
+                prefix = [{"reason": "missing_funding", "source": "no_observed_funding"}]
+            elif record.get("funding_schedule"):
+                expected = funding_settlement_index(floor, first, record.get("funding_interval_hours", 8), record["funding_schedule"])
+                if len(expected):
+                    prefix = [{"reason": "missing_funding", "source": "observed_calendar",
+                               "start_inclusive": expected[0].isoformat(), "end_exclusive": first.isoformat()}]
+        if prefix:
+            result[market] = {"reason": "leading_missing_funding", "previous_data_start_inclusive": floor.isoformat(),
+                              "data_start_inclusive": first.isoformat() if first is not None else None,
+                              "missing_intervals": prefix}
+    return result
+
+
+def cache_funding_start_adjustments(cache_dir: Path) -> dict:
+    cache = Path(cache_dir).resolve()
+    if not (cache / "manifest.json").is_file():
+        return {}
+    signature = []
+    for name in ("manifest.json", "instruments.json", "funding_rate.parquet"):
+        path = cache / name
+        stat = path.stat() if path.is_file() else None
+        signature.append((name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) if stat is not None else (name, None))
+    return _funding_start_adjustments(str(cache), tuple(signature))
 
 
 def read_market_candle_frame(

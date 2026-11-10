@@ -18,6 +18,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from lib.backtest_engine_v2 import read_backtest_curve, resolve_backtest_artifact
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -31,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         required=True,
         help=(
-            "Candidate backtest directory containing equity_curve.csv, benchmark_curve.csv, "
+            "Candidate backtest directory containing equity_curve/benchmark_curve in CSV or Parquet, "
             "and summary.csv. Repeat for multiple candidates."
         ),
     )
@@ -65,9 +67,8 @@ def _resolve_path(value: str | Path) -> Path:
 
 
 def _read_curve(path: Path, label: str) -> pd.Series:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing {label} curve: {path}")
-    frame = pd.read_csv(path, index_col=0, parse_dates=True)
+    path = resolve_backtest_artifact(path, prefer_summary=True)
+    frame = read_backtest_curve(path)
     if frame.empty or frame.shape[1] != 1:
         raise ValueError(f"{label} curve must contain exactly one value column: {path}")
     curve = pd.to_numeric(frame.iloc[:, 0], errors="coerce").dropna().sort_index()
@@ -281,6 +282,8 @@ def main() -> int:
             raise FileNotFoundError(f"Backtest directory does not exist: {backtest_dir}")
         summary = _read_summary(backtest_dir / "summary.csv")
         annualization_factor = _annualization_factor(summary)
+        strategy_curve_path = resolve_backtest_artifact(backtest_dir / "equity_curve.csv", prefer_summary=True)
+        benchmark_curve_path = resolve_backtest_artifact(backtest_dir / "benchmark_curve.csv", prefer_summary=True)
         returns, aligned = _aligned_returns(
             backtest_dir,
             start_date=start_date,
@@ -321,9 +324,11 @@ def main() -> int:
             {
                 "candidate_label": candidate_label,
                 "source_backtest_dir": str(backtest_dir),
-                "equity_curve_csv": str(backtest_dir / "equity_curve.csv"),
+                "equity_curve_path": str(strategy_curve_path),
+                "equity_curve_csv": str(strategy_curve_path) if strategy_curve_path.suffix == ".csv" else None,
                 "benchmark_source": "backtest_artifact",
-                "benchmark_curve_csv": str(backtest_dir / "benchmark_curve.csv"),
+                "benchmark_curve_path": str(benchmark_curve_path),
+                "benchmark_curve_csv": str(benchmark_curve_path) if benchmark_curve_path.suffix == ".csv" else None,
                 "benchmark_label": benchmark_label,
                 "summary_csv": str(backtest_dir / "summary.csv"),
                 "auto_block_size_raw_stationary_median": auto_block_size_raw,

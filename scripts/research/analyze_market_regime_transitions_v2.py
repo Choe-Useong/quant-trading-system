@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +14,10 @@ import pandas as pd
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from lib.backtest_engine_v2 import read_backtest_curve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,12 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy-equity-csv",
         default="",
-        help="Optional strategy equity curve CSV for strategy-specific onset analysis",
+        help="Optional strategy equity curve CSV or Parquet for strategy-specific onset analysis",
     )
     parser.add_argument(
         "--strategy-value-column",
         default="",
-        help="Optional value column when strategy equity CSV contains multiple value columns",
+        help="Optional value column when strategy equity contains multiple value columns",
     )
     parser.add_argument(
         "--strategy-name",
@@ -174,13 +179,10 @@ def _read_price_frame(
 
 
 def _read_equity_curve(path: Path, *, value_column: str) -> pd.Series:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing strategy equity curve: {path}")
-    frame = pd.read_csv(path)
-    if frame.empty or frame.shape[1] < 2:
+    frame = read_backtest_curve(path, prefer_summary=True)
+    if frame.empty or frame.shape[1] < 1:
         raise ValueError(f"Strategy equity curve needs date and value columns: {path}")
-    date_column = "date" if "date" in frame.columns else str(frame.columns[0])
-    candidates = [str(column) for column in frame.columns if str(column) != date_column]
+    candidates = [str(column) for column in frame.columns]
     selected_value = value_column.strip() if value_column else ""
     if not selected_value:
         if len(candidates) != 1:
@@ -191,7 +193,7 @@ def _read_equity_curve(path: Path, *, value_column: str) -> pd.Series:
     if selected_value not in frame.columns:
         raise ValueError(f"Missing strategy value column {selected_value!r}: {path}")
 
-    dates = pd.to_datetime(frame[date_column], errors="coerce", utc=False).dt.normalize()
+    dates = pd.to_datetime(frame.index, errors="coerce", utc=False).normalize()
     values = pd.to_numeric(frame[selected_value], errors="coerce")
     curve = pd.Series(values.to_numpy(dtype=float), index=dates, name="strategy_equity")
     curve = curve.loc[curve.index.notna()]

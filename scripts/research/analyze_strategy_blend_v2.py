@@ -18,6 +18,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from lib.backtest_engine_v2 import read_backtest_curve
+
 from scripts.run_vectorbt import (  # noqa: E402
     compute_drawdown_recovery_stats,
     compute_return_series,
@@ -77,17 +79,13 @@ def _source_specs(payload: dict[str, Any]) -> list[SourceSpec]:
 
 
 def _read_equity_curve(spec: SourceSpec) -> pd.Series:
-    if not spec.equity_csv.exists():
-        raise FileNotFoundError(f"Missing equity curve for {spec.name}: {spec.equity_csv}")
-
-    frame = pd.read_csv(spec.equity_csv)
-    if frame.empty or frame.shape[1] < 2:
+    frame = read_backtest_curve(spec.equity_csv, prefer_summary=True)
+    if frame.empty or frame.shape[1] < 1:
         raise ValueError(f"Equity curve needs a date and value column: {spec.equity_csv}")
 
-    date_column = "date" if "date" in frame.columns else str(frame.columns[0])
     value_column = spec.value_column
     if value_column is None:
-        candidates = [column for column in frame.columns if column != date_column]
+        candidates = list(frame.columns)
         if len(candidates) != 1:
             raise ValueError(
                 f"Specify value_column for a multi-value equity curve: {spec.equity_csv}"
@@ -96,7 +94,7 @@ def _read_equity_curve(spec: SourceSpec) -> pd.Series:
     if value_column not in frame.columns:
         raise ValueError(f"Missing value column {value_column!r}: {spec.equity_csv}")
 
-    dates = pd.to_datetime(frame[date_column], errors="coerce")
+    dates = pd.to_datetime(frame.index, errors="coerce")
     values = pd.to_numeric(frame[value_column], errors="coerce")
     curve = pd.Series(values.to_numpy(), index=dates, name=spec.name).dropna().sort_index()
     if curve.index.has_duplicates:

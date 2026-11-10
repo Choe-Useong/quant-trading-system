@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from functools import lru_cache
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from lib.specs import (
     DefensiveSleeveSpec,
     FeatureSpec,
     FilterStageSpec,
+    HoldingSelectionSpec,
+    HedgeSpec,
     LogicalSpec,
     MarketScoreComponentSpec,
     MarketScoreRuleSpec,
@@ -122,6 +125,7 @@ def load_feature_specs_from_payload(payload: list[dict]) -> list[FeatureSpec]:
                 entry_feature=state_payload["entry_feature"],
                 exit_feature=state_payload["exit_feature"],
                 cooldown_bars=int(state_payload.get("cooldown_bars", 0)),
+                max_holding_bars=state_payload.get("max_holding_bars"),
             )
         breadth = None
         if "breadth" in item:
@@ -179,19 +183,21 @@ def _load_markets_file(path_value: str | Path) -> tuple[str, ...]:
     return tuple(str(market).upper() for market in markets if str(market).strip())
 
 
-def load_universe_spec_from_payload(payload: dict) -> UniverseSpec:
-    def _load_rank_filter_spec(item: dict) -> RankFilterSpec:
-        return RankFilterSpec(
-            feature_column=item["feature_column"],
-            mode=item.get("mode", "top_n"),
-            lag=item.get("lag", 0),
-            top_n=item.get("top_n", 30),
-            quantiles=item.get("quantiles", 5),
-            bucket_values=tuple(item.get("bucket_values", [1])),
-            ascending=item.get("ascending", False),
-            scope=item.get("scope", "filtered"),
-        )
+def _load_rank_filter_spec(item: dict) -> RankFilterSpec:
+    return RankFilterSpec(
+        feature_column=item["feature_column"],
+        mode=item.get("mode", "top_n"),
+        lag=item.get("lag", 0),
+        top_n=item.get("top_n", 30),
+        quantiles=item.get("quantiles", 5),
+        bucket_values=tuple(int(value) if isinstance(value, str) and value.isdecimal() else value
+                            for value in item.get("bucket_values", [1])),
+        ascending=item.get("ascending", False),
+        scope=item.get("scope", "filtered"),
+    )
 
+
+def load_universe_spec_from_payload(payload: dict) -> UniverseSpec:
     allowed_markets = tuple(str(market).upper() for market in payload.get("allowed_markets", []))
     if payload.get("allowed_markets_file"):
         file_markets = _load_markets_file(payload["allowed_markets_file"])
@@ -200,6 +206,14 @@ def load_universe_spec_from_payload(payload: dict) -> UniverseSpec:
     if payload.get("excluded_markets_file"):
         file_markets = _load_markets_file(payload["excluded_markets_file"])
         excluded_markets = tuple(dict.fromkeys((*excluded_markets, *file_markets)))
+
+    holding = None
+    if payload.get("holding") is not None:
+        block = payload["holding"]
+        if (not isinstance(block, dict) or "exit_feature" not in block
+                or set(block) - {"exit_feature", "exit_lag", "max_holding_bars", "cooldown_bars"}):
+            raise ValueError("Invalid universe.holding configuration")
+        holding = HoldingSelectionSpec(**block)
 
     return UniverseSpec(
         feature_column=payload["feature_column"],
@@ -235,6 +249,7 @@ def load_universe_spec_from_payload(payload: dict) -> UniverseSpec:
             for item in payload.get("filter_stages", [])
         ),
         name=payload.get("name"),
+        holding=holding,
     )
 
 
@@ -243,7 +258,90 @@ def load_universe_spec(path: Path) -> UniverseSpec:
     return load_universe_spec_from_payload(payload)
 
 
+def _load_weight_side_filter(item):
+    if item is None:
+        return None
+    if not isinstance(item, dict):
+        raise ValueError("long_filter/short_filter must be a rank filter or a filter group")
+    if "filters" not in item:
+        return _load_rank_filter_spec(item)
+    if set(item) - {"mode", "filters"}:
+        raise ValueError("Side filter groups accept only mode and filters")
+    mode = item.get("mode", "and")
+    if mode not in ("and", "sequential"):
+        raise ValueError("Side filter groups support mode='and' or 'sequential'")
+    filters = item["filters"]
+    if not isinstance(filters, list) or not filters:
+        raise ValueError("Side filter groups require a non-empty filters array")
+    if any(not isinstance(value, dict) or "filters" in value for value in filters):
+        raise ValueError("Side filter groups require flat rank filter objects")
+    return FilterStageSpec(mode=mode, filters=tuple(_load_rank_filter_spec(value) for value in filters))
+
+
+STRATEGY_SLEEVE_KEYS = frozenset({"name", "capital", "universe_spec", "weight_spec"})
+
+
+def load_strategy_sleeves_from_payload(payload: dict) -> tuple[dict, ...] | None:
+    """Return validated sleeve payloads, or None for an ordinary weight payload.
+
+    Each sleeve keeps its own universe/weight payloads; they are loaded by the
+    ordinary loaders when the sleeve is built. capital scales the sleeve's
+    account-equity target weights and may sum above one.
+    """
+    if not isinstance(payload, dict) or "strategy_sleeves" not in payload:
+        return None
+    extra = set(payload) - {"strategy_sleeves"}
+    if extra:
+        raise ValueError(f"strategy_sleeves cannot be combined with top-level weight settings: {sorted(extra)}")
+    items = payload["strategy_sleeves"]
+    if not isinstance(items, list) or not items:
+        raise ValueError("strategy_sleeves must be a non-empty list")
+    sleeves, names = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Each strategy sleeve must be an object")
+        unknown = set(item) - STRATEGY_SLEEVE_KEYS
+        if unknown:
+            raise ValueError(f"Unknown strategy sleeve settings: {sorted(unknown)}")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise ValueError("Each strategy sleeve needs a unique non-empty name")
+        names.add(name)
+        capital = item.get("capital")
+        if isinstance(capital, bool) or not isinstance(capital, (int, float)) or not math.isfinite(capital) or capital < 0:
+            raise ValueError(f"Strategy sleeve {name} capital must be a finite non-negative number")
+        weight = item.get("weight_spec")
+        if not isinstance(weight, dict):
+            raise ValueError(f"Strategy sleeve {name} requires a weight_spec object")
+        for key in ("strategy_sleeves", "hedge", "defensive_sleeve"):
+            if weight.get(key) is not None:
+                raise ValueError(f"Strategy sleeve {name} does not support {key}")
+        universe = item.get("universe_spec")
+        if universe is not None and not isinstance(universe, dict):
+            raise ValueError(f"Strategy sleeve {name} universe_spec must be an object")
+        sleeves.append({"name": name, "capital": float(capital), "universe_spec": universe, "weight_spec": weight})
+    return tuple(sleeves)
+
+
 def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
+    if isinstance(payload, dict) and "strategy_sleeves" in payload:
+        # Only the grid runner combines sleeves; other tools must not read the
+        # payload as an ordinary (default equal-weight) specification.
+        raise ValueError("strategy_sleeves is handled only by the grid, walk-forward, PBO and SPA runners "
+                         "(scripts/run_cross_section_grid_v2.py and tools built on it)")
+    hedge = None
+    if payload.get("hedge") is not None:
+        hedge_payload = payload["hedge"]
+        unknown = set(hedge_payload) - {"market", "mode", "beta_feature", "beta_lag", "ratio"}
+        if unknown:
+            raise ValueError(f"Unknown hedge settings: {sorted(unknown)}")
+        hedge = HedgeSpec(
+            market=str(hedge_payload["market"]).strip().upper(),
+            mode=str(hedge_payload.get("mode", "beta")),
+            beta_feature=hedge_payload.get("beta_feature"),
+            beta_lag=hedge_payload.get("beta_lag", 1),
+            ratio=float(hedge_payload.get("ratio", 1.0)),
+        )
     defensive_sleeve = None
     if payload.get("defensive_sleeve") is not None:
         sleeve_payload = payload["defensive_sleeve"]
@@ -272,8 +370,19 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
             min_pair_obs_ratio=float(target_payload.get("min_pair_obs_ratio", 0.8)),
         )
 
+    change_only_scope = payload.get("change_only_scope", "portfolio")
+    if change_only_scope not in ("portfolio", "asset"):
+        raise ValueError("change_only_scope must be 'portfolio' or 'asset'")
     return WeightSpec(
         weighting=payload.get("weighting", "equal"),
+        long_exposure=payload.get("long_exposure", 0.5),
+        short_exposure=payload.get("short_exposure", 0.5),
+        long_exposure_feature=payload.get("long_exposure_feature"),
+        short_exposure_feature=payload.get("short_exposure_feature"),
+        long_exposure_lag=payload.get("long_exposure_lag", 0),
+        short_exposure_lag=payload.get("short_exposure_lag", 0),
+        long_filter=_load_weight_side_filter(payload.get("long_filter")),
+        short_filter=_load_weight_side_filter(payload.get("short_filter")),
         gross_exposure=payload.get("gross_exposure", 1.0),
         gross_exposure_feature=payload.get("gross_exposure_feature"),
         gross_exposure_lag=payload.get("gross_exposure_lag", 0),
@@ -301,6 +410,7 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
         listed_feature=str(payload.get("listed_feature", "trade_price")),
         gross_exposure_update_frequency=str(payload.get("gross_exposure_update_frequency", "")),
         output_mode=str(payload.get("output_mode", "")),
+        change_only_scope=change_only_scope,
         hrp_window=payload.get("hrp_window", 126),
         hrp_min_valid_ratio=payload.get("hrp_min_valid_ratio", 0.9),
         hrp_min_pair_obs_ratio=payload.get("hrp_min_pair_obs_ratio", 0.8),
@@ -313,6 +423,7 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
         cluster_price_feature=str(payload.get("cluster_price_feature", "trade_price")),
         defensive_sleeve=defensive_sleeve,
         portfolio_vol_target=portfolio_vol_target,
+        hedge=hedge,
     )
 
 

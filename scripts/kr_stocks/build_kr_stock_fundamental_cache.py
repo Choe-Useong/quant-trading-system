@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +12,15 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.kr_stocks.dart_xbrl import (  # noqa: E402
+    XBRL_ITEM_COLUMNS,
+    annual_filing_versions,
+    extract_period_ym,
+)
+
 DEFAULT_RAW_DIR = ROOT / "data" / "kr_stocks" / "raw"
 DEFAULT_SOURCE_CACHE_DIR = ROOT / "data" / "stocks_cache" / "kr_stock_daily"
 
@@ -20,24 +29,36 @@ DISCLOSURE_FILE = "fundamental_disclosures.parquet"
 SUMMARY_FILE = "fundamental_summary.parquet"
 STOCK_ISSUANCE_FILE = "fundamental_stock_issuance_disclosures.parquet"
 STOCK_DIVIDEND_FILE = "fundamental_stock_dividends.parquet"
+XBRL_VALUES_FILE = "fundamental_xbrl_values.parquet"
 MARCAP_FILE = "marcap_daily.parquet"
 REPORT_FILE = "fundamental_cache_report.json"
-
-ANNUAL_REPORT_TOKEN = "\uc0ac\uc5c5\ubcf4\uace0\uc11c"
-ANNUAL_REPORT_PATTERN = re.compile(
-    rf"{ANNUAL_REPORT_TOKEN}\s*\((\d{{4}})[.\-](\d{{2}})\)"
-)
 
 RAW_VALUE_COLUMNS = {
     "fundamental_revenue": "enpSaleAmt",
     "fundamental_operating_profit": "enpBzopPft",
     "fundamental_net_income": "enpCrtmNpf",
-    "fundamental_comprehensive_income": "iclsPalClcAmt",
+    "fundamental_pretax_income": "iclsPalClcAmt",
     "fundamental_total_assets": "enpTastAmt",
     "fundamental_total_liabilities": "enpTdbtAmt",
     "fundamental_total_equity": "enpTcptAmt",
     "fundamental_capital_stock": "enpCptlAmt",
 }
+
+# The data.go.kr summary reports some missing items as 0 (e.g. Hyundai Motor
+# consolidated net income FY2018-2022). An exact 0 is treated as missing for
+# items that cannot plausibly be exactly 0 for a listed company. Revenue is
+# excluded because pre-revenue companies do report 0.
+ZERO_AS_MISSING_COLUMNS = frozenset(
+    {
+        "fundamental_operating_profit",
+        "fundamental_net_income",
+        "fundamental_pretax_income",
+        "fundamental_total_assets",
+        "fundamental_total_liabilities",
+        "fundamental_total_equity",
+        "fundamental_capital_stock",
+    }
+)
 
 DERIVED_ABSOLUTE_EVENT_COLUMNS = [
     "fundamental_beginning_total_equity",
@@ -104,6 +125,16 @@ def parse_args() -> argparse.Namespace:
             "Payments become available on the day after the cash payment date."
         ),
     )
+    parser.add_argument(
+        "--use-xbrl-versions",
+        action="store_true",
+        help=(
+            "Activate every annual filing version: earlier filings of a "
+            "corrected period use their own XBRL values from "
+            f"{XBRL_VALUES_FILE} (update_kr_stock_fundamentals.py "
+            "--include-xbrl-versions). Without it only the final filing is used."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -151,10 +182,7 @@ def _load_raw_frames(raw_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
 
 
 def _extract_period_ym(report_name: object) -> str:
-    match = ANNUAL_REPORT_PATTERN.search(str(report_name or ""))
-    if not match:
-        return ""
-    return f"{match.group(1)}{match.group(2)}"
+    return extract_period_ym(report_name)
 
 
 def _select_final_annual_disclosures(disclosures: pd.DataFrame) -> pd.DataFrame:
@@ -814,6 +842,7 @@ def _build_dividend_latest_fy_frames(
         value_column="fundamental_cash_dividend_latest_fy_amount_proxy",
         index=index,
         columns=columns,
+        period_column="fiscal_end",
     )
     available = _event_to_wide(
         fiscal_events,
@@ -821,6 +850,7 @@ def _build_dividend_latest_fy_frames(
         index=index,
         columns=columns,
         dtype="float32",
+        period_column="fiscal_end",
     )
     amount = amount.where(available.eq(1.0))
 
@@ -1007,6 +1037,7 @@ def _build_latest_fy_net_share_supply_frames(
         value_column="change_for_wide",
         index=index,
         columns=columns,
+        period_column="fiscal_end",
     )
     available = _event_to_wide(
         periods,
@@ -1014,6 +1045,7 @@ def _build_latest_fy_net_share_supply_frames(
         index=index,
         columns=columns,
         dtype="float32",
+        period_column="fiscal_end",
     )
     change = change.where(available.eq(1.0))
     diagnostics = {
@@ -1045,7 +1077,10 @@ def _select_financial_statements(summary: pd.DataFrame) -> pd.DataFrame:
         ["crno", "bizYear", "basDt", "statement_preference"]
     ).drop_duplicates(["crno", "bizYear", "basDt"], keep="first")
     for output_column, raw_column in RAW_VALUE_COLUMNS.items():
-        selected[output_column] = _to_number(selected[raw_column])
+        values = _to_number(selected[raw_column])
+        if output_column in ZERO_AS_MISSING_COLUMNS:
+            values = values.mask(values.eq(0.0))
+        selected[output_column] = values
     selected["fundamental_statement_type"] = pd.to_numeric(
         selected["fnclDcd"], errors="coerce"
     )
@@ -1065,6 +1100,13 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series, *, positive: bool)
 def _attach_beginning_total_equity(
     events: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Previous fiscal-year equity as known when each event activates.
+
+    For every event, the latest event of fiscal year - 1 (same stock) that was
+    already activated on the event's activation date is used, when its
+    statement type matches and its equity is present. With filing versions
+    this picks the version of the previous year known at that time.
+    """
     required = {
         "stock_code",
         "fundamental_financial_year",
@@ -1080,65 +1122,152 @@ def _attach_beginning_total_equity(
             f"{sorted(missing)}"
         )
 
-    ordered = events.copy()
-    ordered["_beginning_equity_order"] = np.arange(len(ordered))
-    ordered = ordered.sort_values(
-        [
-            "stock_code",
-            "fundamental_financial_year",
-            "activation_date",
-            "basDt",
-        ]
+    ordered = events.copy().reset_index(drop=True)
+    year = pd.to_numeric(ordered["fundamental_financial_year"], errors="coerce").astype("float64")
+    left = pd.DataFrame(
+        {
+            "_row": np.arange(len(ordered)),
+            "stock_code": ordered["stock_code"].astype(str),
+            "_year": (year - 1.0).fillna(-1.0),
+            "activation_date": pd.to_datetime(ordered["activation_date"]),
+        }
+    ).sort_values(["activation_date", "_row"], kind="mergesort")
+    right = pd.DataFrame(
+        {
+            "stock_code": ordered["stock_code"].astype(str),
+            "_year": year.fillna(-2.0),
+            "_previous_activation": pd.to_datetime(ordered["activation_date"]),
+            "_previous_basdt": ordered["basDt"].astype(str),
+            "_previous_order": np.arange(len(ordered)),
+            "_previous_statement_type": ordered["fundamental_statement_type"],
+            "_previous_equity": ordered["fundamental_total_equity"],
+        }
+    ).sort_values(
+        ["_previous_activation", "_previous_basdt", "_previous_order"], kind="mergesort"
     )
-    grouped = ordered.groupby("stock_code", sort=False)
-    previous_year = grouped["fundamental_financial_year"].shift()
-    previous_statement_type = grouped["fundamental_statement_type"].shift()
-    previous_equity = grouped["fundamental_total_equity"].shift()
-    previous_activation_date = grouped["activation_date"].shift()
+    matched = pd.merge_asof(
+        left,
+        right,
+        left_on="activation_date",
+        right_on="_previous_activation",
+        by=["stock_code", "_year"],
+        direction="backward",
+        allow_exact_matches=True,
+    ).sort_values("_row")
+    previous_type = matched["_previous_statement_type"].to_numpy()
+    previous_equity = matched["_previous_equity"].to_numpy(dtype="float64")
+    found = matched["_previous_activation"].notna().to_numpy()
+    same_statement_type = found & (
+        ordered["fundamental_statement_type"].to_numpy() == previous_type
+    )
+    valid = same_statement_type & ~np.isnan(previous_equity)
+    ordered["fundamental_beginning_total_equity"] = np.where(valid, previous_equity, np.nan)
 
-    has_previous = previous_year.notna()
-    consecutive_year = ordered["fundamental_financial_year"].eq(
-        previous_year + 1.0
-    )
-    same_statement_type = ordered["fundamental_statement_type"].eq(
-        previous_statement_type
-    )
-    available_at_activation = previous_activation_date.le(
-        ordered["activation_date"]
-    )
-    valid = (
-        consecutive_year
-        & same_statement_type
-        & available_at_activation
-        & previous_equity.notna()
-    )
-    ordered["fundamental_beginning_total_equity"] = previous_equity.where(valid)
-
+    keys = ordered["stock_code"].astype(str) + "|" + year.astype(str)
+    previous_keys = ordered["stock_code"].astype(str) + "|" + (year - 1.0).astype(str)
+    previous_year_exists = previous_keys.isin(set(keys)).to_numpy()
+    earlier_year_exists = (
+        ordered.groupby("stock_code")["fundamental_financial_year"].transform("min") < year
+    ).to_numpy()
     diagnostics = {
         "valid_rows": int(valid.sum()),
         "missing_rows": int((~valid).sum()),
-        "year_gap_rows": int((has_previous & ~consecutive_year).sum()),
-        "statement_type_mismatch_rows": int(
-            (consecutive_year & ~same_statement_type).sum()
-        ),
+        "year_gap_rows": int((earlier_year_exists & ~previous_year_exists).sum()),
+        "statement_type_mismatch_rows": int((found & ~same_statement_type).sum()),
         "previous_filing_not_yet_available_rows": int(
-            (consecutive_year & same_statement_type & ~available_at_activation).sum()
+            (previous_year_exists & ~found).sum()
         ),
         "missing_previous_equity_rows": int(
-            (
-                consecutive_year
-                & same_statement_type
-                & available_at_activation
-                & previous_equity.isna()
-            ).sum()
+            (same_statement_type & np.isnan(previous_equity)).sum()
         ),
     }
-    ordered = (
-        ordered.sort_values("_beginning_equity_order")
-        .drop(columns="_beginning_equity_order")
-        .reset_index(drop=True)
-    )
     return ordered, diagnostics
+
+
+def _normalize_xbrl_values(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {"rcept_no", "statement", "status", *XBRL_ITEM_COLUMNS}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"XBRL value cache is missing columns: {sorted(missing)}")
+    values = frame[["rcept_no", "statement", "status", *XBRL_ITEM_COLUMNS]].copy()
+    for column in ("rcept_no", "statement", "status"):
+        values[column] = values[column].fillna("").astype(str).str.strip()
+    values = values[values["status"].eq("ok") & values["statement"].isin({"110", "120"})]
+    for column in XBRL_ITEM_COLUMNS:
+        numbers = pd.to_numeric(values[column], errors="coerce").astype("float64")
+        if column in ZERO_AS_MISSING_COLUMNS:
+            numbers = numbers.mask(numbers.eq(0.0))
+        values[column] = numbers
+    duplicated = values.duplicated(["rcept_no", "statement"], keep=False)
+    if bool(duplicated.any()):
+        raise ValueError("XBRL value cache has duplicate (rcept_no, statement) rows")
+    return values.drop(columns="status")
+
+
+def _versioned_statement_events(
+    statements: pd.DataFrame,
+    disclosures: pd.DataFrame,
+    xbrl_values: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """One event per annual filing version of each statement period.
+
+    The final filing carries the summary values (corrected values); an item
+    the summary lacks is taken from the final filing's XBRL when available.
+    Earlier filings (original and intermediate corrections) carry only their
+    own XBRL values for the same statement type; an earlier filing without
+    such XBRL is dropped, so that period stays unavailable until the next
+    usable filing as before. Items missing from an earlier filing's XBRL stay
+    missing rather than borrowing the corrected value.
+    """
+    versions = annual_filing_versions(disclosures)
+    merged = statements.merge(
+        versions[["corp_code", "period_ym", "rcept_dt", "rcept_no", "report_nm", "version", "is_final"]],
+        on=["corp_code", "period_ym"],
+        how="left",
+        validate="many_to_many",
+    )
+    has_filing = merged["rcept_no"].notna()
+    xbrl = _normalize_xbrl_values(xbrl_values).rename(
+        columns={column: f"_xbrl_{column}" for column in XBRL_ITEM_COLUMNS}
+    )
+    merged = merged.merge(
+        xbrl.rename(columns={"statement": "_xbrl_statement"}),
+        left_on=["rcept_no", "fnclDcd"],
+        right_on=["rcept_no", "_xbrl_statement"],
+        how="left",
+        validate="many_to_one",
+    )
+    has_xbrl = merged["_xbrl_statement"].notna()
+    is_final = merged["is_final"].eq(True)
+    earlier = has_filing & ~is_final
+    filled_counts: dict[str, int] = {}
+    for column in XBRL_ITEM_COLUMNS:
+        xbrl_column = f"_xbrl_{column}"
+        fill = is_final & merged[column].isna() & merged[xbrl_column].notna()
+        filled_counts[column] = int(fill.sum())
+        merged[column] = merged[column].where(~fill, merged[xbrl_column])
+        merged[column] = merged[column].where(~earlier, merged[xbrl_column])
+    # Items the XBRL parser does not read stay missing on earlier versions.
+    for column in RAW_VALUE_COLUMNS:
+        if column not in XBRL_ITEM_COLUMNS:
+            merged[column] = merged[column].where(~earlier)
+    keep = ~has_filing | is_final | (earlier & has_xbrl)
+    diagnostics = {
+        "rule": (
+            "each annual filing version from the next trading day: earlier "
+            "versions use their own XBRL values, the final version uses the "
+            "summary with missing items filled from its XBRL"
+        ),
+        "earlier_version_rows": int(earlier.sum()),
+        "earlier_version_rows_used": int((earlier & has_xbrl).sum()),
+        "earlier_version_rows_without_xbrl": int((earlier & ~has_xbrl).sum()),
+        "final_rows": int(is_final.sum()),
+        "final_items_filled_from_xbrl": filled_counts,
+    }
+    events = merged[keep].drop(
+        columns=["_xbrl_statement", *[f"_xbrl_{column}" for column in XBRL_ITEM_COLUMNS]]
+    )
+    return events.reset_index(drop=True), diagnostics
 
 
 def _build_fundamental_events(
@@ -1146,6 +1275,7 @@ def _build_fundamental_events(
     disclosures: pd.DataFrame,
     summary: pd.DataFrame,
     market_columns: pd.Index,
+    xbrl_values: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     required_map = {"stock_code", "corp_code", "jurir_no"}
     missing_map = required_map - set(corp_map.columns)
@@ -1167,13 +1297,19 @@ def _build_fundamental_events(
         how="inner",
         validate="many_to_one",
     )
-    final_reports = _select_final_annual_disclosures(disclosures)
-    events = statements.merge(
-        final_reports,
-        on=["corp_code", "period_ym"],
-        how="left",
-        validate="many_to_one",
-    )
+    version_diagnostics: dict[str, object] | None = None
+    if xbrl_values is None:
+        final_reports = _select_final_annual_disclosures(disclosures)
+        events = statements.merge(
+            final_reports,
+            on=["corp_code", "period_ym"],
+            how="left",
+            validate="many_to_one",
+        )
+    else:
+        events, version_diagnostics = _versioned_statement_events(
+            statements, disclosures, xbrl_values
+        )
     unmatched = events[events["rcept_dt"].isna() | events["rcept_dt"].eq("")].copy()
     events = events[events["rcept_dt"].notna() & events["rcept_dt"].ne("")].copy()
     events["report_date"] = pd.to_datetime(
@@ -1226,7 +1362,29 @@ def _build_fundamental_events(
         "separate_fallback_rows": int(events["fnclDcd"].eq("120").sum()),
         "beginning_total_equity": beginning_equity_diagnostics,
     }
+    if version_diagnostics is not None:
+        diagnostics["filing_versions"] = version_diagnostics
     return events, diagnostics
+
+
+def _drop_superseded_periods(events: pd.DataFrame, period_column: str) -> pd.DataFrame:
+    """Drop events whose fiscal period is older than one already activated.
+
+    A late correction of an old fiscal year must not replace a newer fiscal
+    year that the market already knew. Events activating on the same day are
+    all kept here; the caller keeps the newest period of that day.
+    """
+    period = events[period_column]
+    if not pd.api.types.is_datetime64_any_dtype(period):
+        period = pd.to_numeric(period, errors="coerce")
+    ordered = events.assign(_period_key=period).sort_values(
+        ["stock_code", "activation_date", "_period_key"], kind="mergesort"
+    )
+    previous_max = ordered.groupby("stock_code", sort=False)["_period_key"].transform(
+        lambda values: values.cummax().shift()
+    )
+    keep = previous_max.isna() | ordered["_period_key"].ge(previous_max)
+    return ordered[keep].drop(columns="_period_key")
 
 
 def _event_to_wide(
@@ -1236,7 +1394,26 @@ def _event_to_wide(
     index: pd.DatetimeIndex,
     columns: pd.Index,
     dtype: str = "float32",
+    keep_missing: bool = False,
+    period_column: str | None = None,
 ) -> pd.DataFrame:
+    """Forward-fill event values onto the calendar.
+
+    keep_missing: a missing value in a newer event clears the older value
+        instead of letting it persist.
+    period_column: ignore events for a fiscal period older than one already
+        activated (see _drop_superseded_periods).
+    """
+    if keep_missing or period_column is not None:
+        return _event_to_wide_latest_event(
+            events,
+            value_column=value_column,
+            index=index,
+            columns=columns,
+            dtype=dtype,
+            keep_missing=keep_missing,
+            period_column=period_column,
+        )
     selected = events[["activation_date", "stock_code", value_column]].dropna(
         subset=[value_column]
     )
@@ -1251,6 +1428,54 @@ def _event_to_wide(
     combined_index = index.union(pd.DatetimeIndex(event_frame.index)).sort_values()
     wide = event_frame.reindex(combined_index).ffill().reindex(index=index, columns=columns)
     return wide.astype(dtype)
+
+
+def _event_to_wide_latest_event(
+    events: pd.DataFrame,
+    *,
+    value_column: str,
+    index: pd.DatetimeIndex,
+    columns: pd.Index,
+    dtype: str,
+    keep_missing: bool,
+    period_column: str | None,
+) -> pd.DataFrame:
+    keep_columns = ["activation_date", "stock_code", value_column]
+    if period_column is not None and period_column not in keep_columns:
+        keep_columns.append(period_column)
+    selected = events[keep_columns].copy()
+    selected = selected[selected["activation_date"].notna()]
+    if period_column is not None:
+        selected = _drop_superseded_periods(selected, period_column)
+    if not keep_missing:
+        selected = selected.dropna(subset=[value_column])
+    if selected.empty:
+        return pd.DataFrame(np.nan, index=index, columns=columns, dtype=dtype)
+    sort_columns = ["stock_code", "activation_date"]
+    if period_column is not None:
+        sort_columns.append(period_column)
+    # One event per stock and day: the newest period (stable order otherwise).
+    selected = selected.sort_values(sort_columns, kind="mergesort").drop_duplicates(
+        ["activation_date", "stock_code"], keep="last"
+    )
+    values = pd.to_numeric(selected[value_column], errors="coerce").to_numpy(dtype="float64")
+    selected = selected.assign(_event_position=np.arange(len(selected), dtype="float64"))
+    # Forward-fill the position of the latest event, then look its value up, so
+    # a missing value in the latest event stays missing.
+    position_frame = selected.pivot(
+        index="activation_date", columns="stock_code", values="_event_position"
+    ).sort_index()
+    combined_index = index.union(pd.DatetimeIndex(position_frame.index)).sort_values()
+    positions = (
+        position_frame.reindex(combined_index)
+        .ffill()
+        .reindex(index=index, columns=columns)
+        .to_numpy(dtype="float64")
+    )
+    out = np.full(positions.shape, np.nan, dtype="float64")
+    known = ~np.isnan(positions)
+    out[known] = values[positions[known].astype("int64")]
+    return pd.DataFrame(out, index=index, columns=columns).astype(dtype)
 
 
 def _common_share_flag(
@@ -1282,10 +1507,23 @@ def _write_report(
 ) -> None:
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        # Rebuild with the same options after a price update (see DATA-009).
+        "build_args": list(sys.argv[1:]),
         "raw_dir": str(raw_dir),
         "source_cache_dir": str(source_cache_dir),
         "out_dir": str(out_dir),
-        "availability_rule": "final annual filing value from the next trading day",
+        "availability_rule": (
+            (
+                "every annual filing version from the next trading day (earlier "
+                "versions from their own XBRL, the final version from the summary); "
+                if "filing_versions" in diagnostics
+                else "final annual filing value from the next trading day; "
+            )
+            + "an exact 0 in non-revenue items is missing; a missing value in the "
+            "latest fiscal year stays missing; corrections of an older fiscal "
+            "year do not replace an already activated newer fiscal year"
+        ),
+        "zero_as_missing_columns": sorted(ZERO_AS_MISSING_COLUMNS),
         "calendar_start": index.min().date().isoformat(),
         "calendar_end": index.max().date().isoformat(),
         "calendar_rows": int(len(index)),
@@ -1331,8 +1569,13 @@ def main() -> int:
 
     index, columns = _load_calendar(source_cache_dir, args.start, args.end)
     corp_map, disclosures, summary = _load_raw_frames(raw_dir)
+    xbrl_values = (
+        pd.read_parquet(_required_path(raw_dir / XBRL_VALUES_FILE))
+        if args.use_xbrl_versions
+        else None
+    )
     events, diagnostics = _build_fundamental_events(
-        corp_map, disclosures, summary, columns
+        corp_map, disclosures, summary, columns, xbrl_values=xbrl_values
     )
     if events.empty:
         raise ValueError("No point-in-time fundamental events matched the source-cache universe")
@@ -1394,6 +1637,8 @@ def main() -> int:
             value_column=value_column,
             index=index,
             columns=columns,
+            keep_missing=True,
+            period_column="basDt",
         )
         frame.to_parquet(out_dir / f"{value_column}.parquet")
         frame_stats[value_column] = {
