@@ -35,6 +35,8 @@
   <tr><td align="left" valign="top">순손익 집중</td><td align="right" valign="top">SK하이닉스·SK스퀘어·삼성전자 합계 45.6%</td><td align="right" valign="top">—</td></tr>
 </table>
 
+**CAGR 산출 기준:** 위 전체 기간 국내 주식 및 KOSPI200 CAGR은 일봉 백테스트의 연간 252개 수익률 관측치 기준으로 연환산한 결과다. 시작일과 종료일의 달력일 수만으로 누적수익률을 연환산하면 다른 값이 나올 수 있다. 아래 Walk-Forward 성과는 별도 OOS 구간에 대한 달력일 연환산 결과로, 전체 기간 고정 전략과 평가기간·산출 기준을 구분해야 한다.
+
 ### 1.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
