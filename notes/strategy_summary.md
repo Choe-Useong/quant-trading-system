@@ -1,6 +1,6 @@
 # 전략별 백테스트
 
-**연환산 기준:** 전체 기간 고정 전략의 국내 주식·미국 ETF 일봉 CAGR은 기본 연간 252개 수익률 관측치, BTC 현물 1시간봉 CAGR은 연간 8,760개 관측치 기준이다. Walk-Forward의 OOS CAGR은 별도 평가기간의 달력일 연환산 결과다. 전체 기간 CAGR과 비교할 때는 평가기간과 계산 방식의 차이를 고려해야 한다. 자세한 검증 조건과 결과는 [전략별 상세 보고서](strategy_examples.md)를 참고한다.
+**연환산 기준:** 국내 주식·미국 ETF의 CAGR은 일봉 연 252개, BTC 현물은 1시간봉 연 8,760개 수익률 관측치 기준이다. 전체 기간 성과와 Walk-Forward OOS 모두 같은 기준이며, 평가기간만 다르다. 자세한 검증 조건과 결과는 [전략별 상세 보고서](strategy_examples.md)를 참고한다.
 
 ## 국내 주식 · 업종 내 순위 모멘텀
 
@@ -34,10 +34,10 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2018.01–2026.01</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>18.13%</strong><br>MDD -56.56%</td>
-    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>21.18%</strong><br>MDD -50.31%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>18.66%</strong><br>MDD -56.56%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>21.82%</strong><br>MDD -50.31%</td>
   </tr>
-  <tr><td colspan="6" valign="top"><strong>동일기간 KOSPI200</strong><br>CAGR 8.52%<br>MDD -41.05%</td></tr>
+  <tr><td colspan="6" valign="top"><strong>동일기간 KOSPI200</strong><br>CAGR 8.77%<br>MDD -41.05%</td></tr>
 </table>
 
 ---
@@ -70,10 +70,10 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2014.05–2026.04</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.82%</strong><br>MDD -23.55%</td>
-    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>19.09%</strong><br>MDD -24.82%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.88%</strong><br>MDD -23.55%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>19.13%</strong><br>MDD -24.82%</td>
   </tr>
-  <tr><td colspan="6" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.17%<br>MDD -29.62%</td></tr>
+  <tr><td colspan="6" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.21%<br>MDD -29.62%</td></tr>
 </table>
 
 ---
