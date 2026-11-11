@@ -5,6 +5,7 @@
     "requirements-futures.txt",
     "configs/public_release_v2.json",
     "notes/strategy_examples.md",
+    "notes/strategy_summary.md",
     "configs/grid_btc_sma_rv240_27_v2.json",
     "configs/grid_btc_ma_10_120_rolling2y_rv_percentile_cut_wide28_60m_openexec_fee5bp_v2.json",
     "configs/presets/features_v2_presets.json",
