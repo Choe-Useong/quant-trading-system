@@ -7,7 +7,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/kr_stock_case.png"><img src="assets/kr_stock_case.png" alt="국내 주식 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2016.01–2026.09<br><br><strong>전략 성과</strong><br>CAGR <strong>37.61%</strong><br>MDD <strong>-57.79%</strong><br>Sharpe <strong>1.22</strong><br><br><strong>KOSPI200</strong><br>CAGR 16.09%<br>MDD -41.19%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2016.01–2026.09<br><br><strong>전략 성과</strong><br>CAGR <strong>37.56%</strong><br>MDD <strong>-57.79%</strong><br>Sharpe <strong>1.22</strong><br><br><strong>KOSPI200</strong><br>CAGR 16.09%<br>MDD -41.19%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
@@ -34,8 +34,8 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2018.01–2026.01</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.16%</strong><br>MDD -53.33%</td>
-    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>26.73%</strong><br>MDD -48.16%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.10%</strong><br>MDD -53.33%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>26.67%</strong><br>MDD -48.16%</td>
   </tr>
   <tr><td colspan="6" valign="top"><strong>동일기간 KOSPI200</strong><br>CAGR 8.77%<br>MDD -41.05%</td></tr>
 </table>
@@ -47,7 +47,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>21.52%</strong><br>MDD <strong>-21.82%</strong><br>Sharpe <strong>1.19</strong><br><br><strong>원화 환산 SPY</strong><br>CAGR 17.08%<br>MDD -29.62%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>21.50%</strong><br>MDD <strong>-21.82%</strong><br>Sharpe <strong>1.19</strong><br><br><strong>원화 환산 SPY</strong><br>CAGR 17.08%<br>MDD -29.62%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
@@ -70,8 +70,8 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2014.05–2026.04</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.85%</strong><br>MDD -23.55%</td>
-    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>19.11%</strong><br>MDD -24.82%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.84%</strong><br>MDD -23.55%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>19.10%</strong><br>MDD -24.82%</td>
   </tr>
   <tr><td colspan="6" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.21%<br>MDD -29.62%</td></tr>
 </table>

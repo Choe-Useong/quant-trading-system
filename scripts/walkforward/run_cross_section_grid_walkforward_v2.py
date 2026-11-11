@@ -53,6 +53,7 @@ from scripts.run_cross_section_grid_v2 import (
     _validate_strategy_sleeve_run,
 )
 from scripts.run_vectorbt import (
+    anchor_initial_cash,
     benchmark_comparison_period_summary,
     benchmark_summary,
     build_benchmark_comparison_curves,
@@ -687,6 +688,7 @@ def _run_v2_backtest_window(
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
+        initial_cash=init_cash,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value
@@ -789,7 +791,10 @@ def _build_stitched_summary(
     periods_per_year: int,
     segment_count: int,
 ) -> pd.Series:
-    strategy_returns = compute_return_series(equity_curve)
+    # Strategy metrics start from init_cash so the first window's entry cost
+    # counts (same anchor as strategy_performance_summary).
+    anchored_curve = anchor_initial_cash(equity_curve, init_cash)
+    strategy_returns = compute_return_series(anchored_curve).iloc[1:]
     comparison_equity_curve, aligned_benchmark_curve = build_benchmark_comparison_curves(
         equity_curve,
         benchmark_curve,
@@ -799,20 +804,20 @@ def _build_stitched_summary(
     benchmark_returns = compute_return_series(aligned_benchmark_curve)
     summary = pd.Series(
         {
-            "Start Value": float(equity_curve.iloc[0]),
+            "Start Value": float(init_cash),
             "End Value": float(equity_curve.iloc[-1]),
-            "Total Return [%]": ((float(equity_curve.iloc[-1]) / float(equity_curve.iloc[0])) - 1.0) * 100.0,
-            "CAGR [%]": compute_annualized_return(equity_curve, annualization_factor=periods_per_year) * 100.0,
-            "Max Drawdown [%]": compute_max_drawdown_pct(equity_curve),
+            "Total Return [%]": ((float(equity_curve.iloc[-1]) / float(init_cash)) - 1.0) * 100.0,
+            "CAGR [%]": compute_annualized_return(anchored_curve, annualization_factor=periods_per_year) * 100.0,
+            "Max Drawdown [%]": compute_max_drawdown_pct(anchored_curve),
             "Sharpe Ratio": compute_sharpe_ratio(strategy_returns, annualization_factor=periods_per_year),
             "CVaR 5% Sharpe": compute_cvar_sharpe_ratio(
                 strategy_returns,
                 annualization_factor=periods_per_year,
                 alpha=0.05,
             ),
-            "Ulcer Index [%]": compute_ulcer_index_pct(equity_curve),
+            "Ulcer Index [%]": compute_ulcer_index_pct(anchored_curve),
             "Martin Ratio": compute_martin_ratio(
-                equity_curve,
+                anchored_curve,
                 annualization_factor=periods_per_year,
             ),
             "Sortino Ratio": compute_sortino_ratio(strategy_returns, annualization_factor=periods_per_year),

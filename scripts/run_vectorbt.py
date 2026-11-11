@@ -819,11 +819,31 @@ def compute_annualized_return(curve: pd.Series, annualization_factor: int = 252)
     return float(total_return ** (annualization_factor / periods) - 1.0)
 
 
+def anchor_initial_cash(curve: pd.Series, initial_cash: float | None) -> pd.Series:
+    """Prepend the starting balance one bar before the first value, so the
+    first bar's change (entry fees and slippage) counts as a return period."""
+    if initial_cash is None or curve.empty:
+        return curve
+    first = curve.index[0]
+    delta = curve.index[1] - first if len(curve) > 1 else pd.Timedelta(days=1)
+    anchor = pd.Series([float(initial_cash)], index=[first - delta])
+    anchored = pd.concat([anchor, curve])
+    anchored.name = curve.name
+    return anchored
+
+
 def strategy_performance_summary(
     curve: pd.Series,
     annualization_factor: int = 252,
+    initial_cash: float | None = None,
 ) -> pd.Series:
-    returns = compute_return_series(curve)
+    """With initial_cash, CAGR and drawdown metrics start from the starting
+    balance and returns include the first bar's change, as the TPE evaluator does."""
+    anchored = anchor_initial_cash(curve, initial_cash)
+    returns = compute_return_series(anchored)
+    if anchored is not curve:
+        returns = returns.iloc[1:]
+    curve = anchored
     annualized_return = compute_annualized_return(curve, annualization_factor=annualization_factor)
     max_drawdown_pct = compute_max_drawdown_pct(curve)
     calmar_ratio = float("nan")
@@ -1320,6 +1340,7 @@ def main() -> None:
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
+        initial_cash=args.init_cash,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value

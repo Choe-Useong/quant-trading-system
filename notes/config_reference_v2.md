@@ -2726,6 +2726,8 @@ SPA와 워크포워드의 계산 방법은 이 PBO 변경으로 바뀌지 않는
 
 벤치마크 상대지표는 전략과 벤치마크에 실제 값이 모두 존재하는 공통 관측기간에서 계산합니다. 전략의 전체기간 CAGR, MDD 등 절대지표는 전략 자체의 전체기간을 유지하며, 요약에는 `Benchmark Comparison Start`, `Benchmark Comparison End`, `Benchmark Comparison Observations`가 기록됩니다.
 
+전략 절대지표의 시작점: 그리드·단일 백테스트·워크포워드(폴드와 이어붙인 OOS) 요약의 `CAGR [%]`, `Calmar Ratio`, `Ulcer Index [%]`, `Martin Ratio`, Sharpe·Sortino·CVaR Sharpe는 자산곡선 첫 값 한 봉 앞에 초기 자금을 붙여 계산한다(TPE 평가와 같은 기준). 첫 봉의 진입 수수료·슬리피지가 수익률 한 기간으로 들어가고, 연환산 기간 수는 관측치 수와 같다. 이어붙인 OOS 요약의 `Start Value`·`Total Return [%]`·`Max Drawdown [%]`도 초기 자금 기준이다. vectorbt 통계의 `Total Return [%]`·`Max Drawdown [%]`와 벤치마크 비교 지표(공통 기간 첫 값으로 정규화)는 바뀌지 않았다.
+
 전략 유니버스에 없는 지수나 ETF를 벤치마크로 사용할 때는 벤치마크 캐시를 별도로 지정한다.
 
 ```json

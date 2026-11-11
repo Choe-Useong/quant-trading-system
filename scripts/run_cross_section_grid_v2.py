@@ -1650,6 +1650,7 @@ def _run_v2_backtest(
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
+        initial_cash=init_cash,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value

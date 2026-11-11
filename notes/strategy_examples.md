@@ -27,7 +27,7 @@
     <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">KOSPI200</th>
   </tr>
   <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">2,685.08%</td><td align="right" valign="top">374.01%</td></tr>
-  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>37.61%</strong></td><td align="right" valign="top">16.09%</td></tr>
+  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>37.56%</strong></td><td align="right" valign="top">16.09%</td></tr>
   <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-57.79%</strong></td><td align="right" valign="top">-41.19%</td></tr>
   <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.22</td><td align="right" valign="top">0.72</td></tr>
   <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.65</td><td align="right" valign="top">0.39</td></tr>
@@ -47,13 +47,13 @@
 | WF | IS 24개월 · STEP 12개월 · OOS 12개월, 8개 적용 구간 · Rolling / Expanding |
 | WF OOS | 2018-01-04 ~ 2026-01-02 |
 
-**동일 기간 성과 (2018-01-04 ~ 2026-01-02 · 1,962거래일 · 252거래일 연환산)**
+**동일 기간 성과 (2018-01-04 ~ 2026-01-02 · 1,962거래일 · 252거래일 연환산 · 구간 첫 값 기준)**
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
 | 고정 설정: 12개월·3개월 제외 | 28.90% | -57.46% | 1.04 |
-| WF Rolling | 23.16% | -53.33% | 0.88 |
-| WF Expanding | 26.73% | -48.16% | 0.99 |
+| WF Rolling | 23.10% | -53.33% | 0.88 |
+| WF Expanding | 26.67% | -48.16% | 0.99 |
 | KOSPI200 | 8.77% | -41.05% | 0.52 |
 
 ---
@@ -85,7 +85,7 @@
     <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">원화 환산 SPY</th>
   </tr>
   <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">1,442.80%</td><td align="right" valign="top">815.76%</td></tr>
-  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>21.52%</strong></td><td align="right" valign="top">17.08%</td></tr>
+  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>21.50%</strong></td><td align="right" valign="top">17.08%</td></tr>
   <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-21.82%</strong></td><td align="right" valign="top">-29.62%</td></tr>
   <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.19</td><td align="right" valign="top">1.00</td></tr>
   <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.99</td><td align="right" valign="top">0.58</td></tr>
@@ -106,13 +106,13 @@
 
 SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확인되지 않았고, 36개 후보 중 정보비율이 양수인 후보는 18개다.
 
-**동일 기간 성과 (2014-05-01 ~ 2026-04-30 · 3,018거래일 · 252거래일 연환산)**
+**동일 기간 성과 (2014-05-01 ~ 2026-04-30 · 3,018거래일 · 252거래일 연환산 · 구간 첫 값 기준)**
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
 | 고정 설정: 12개월·절대 모멘텀 126일·2종목 | 22.46% | -21.82% | 1.21 |
-| WF Rolling | 23.85% | -23.55% | 1.16 |
-| WF Expanding | 19.11% | -24.82% | 0.98 |
+| WF Rolling | 23.84% | -23.55% | 1.16 |
+| WF Expanding | 19.10% | -24.82% | 0.98 |
 | 원화 환산 SPY | 17.21% | -29.62% | 0.97 |
 
 ---
