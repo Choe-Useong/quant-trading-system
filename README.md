@@ -16,10 +16,10 @@
 
 ## 백테스트 사례 미리보기
 
-| 국내 주식 · 업종 내 순위 모멘텀 | 미국 ETF · 상승월·추세 지속성 |
+| 국내 주식 · 업종 내 순위 모멘텀 | 미국 ETF · 1배 ETF 순위 모멘텀 |
 | --- | --- |
 | [![국내 주식 성과 그래프](notes/assets/kr_stock_case.png)](notes/strategy_examples.md#strategy-kr-stock) | [![미국 ETF 성과 그래프](notes/assets/us_etf_case.png)](notes/strategy_examples.md#strategy-us-etf) |
-| **CAGR 37.61% · 최대낙폭 -57.79%**<br>2016-01-04 ~ 2026-09-21 | **CAGR 36.16% · 최대낙폭 -32.15%**<br>2012-05-01 ~ 2026-05-29 |
+| **CAGR 37.61% · 최대낙폭 -57.79%**<br>2016-01-04 ~ 2026-09-21 | **CAGR 21.52% · 최대낙폭 -21.82%**<br>2012-05-01 ~ 2026-05-29 |
 | [국내 주식 상세 보기](notes/strategy_examples.md#strategy-kr-stock) | [미국 ETF 상세 보기](notes/strategy_examples.md#strategy-us-etf) |
 
 <br>
