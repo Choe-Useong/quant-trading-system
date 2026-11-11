@@ -35,7 +35,7 @@
   <tr><td align="left" valign="top">순손익 집중</td><td align="right" valign="top">SK하이닉스·SK스퀘어·삼성전자 합계 45.6%</td><td align="right" valign="top">—</td></tr>
 </table>
 
-**CAGR 산출 기준:** 국내 주식·미국 ETF의 CAGR은 일봉 연 252개, BTC 현물은 1시간봉 연 8,760개 수익률 관측치 기준으로 연환산했다. 전체 기간 성과, Walk-Forward OOS, 동일 기간 비교표 모두 같은 기준이다. 시작일과 종료일의 달력일 수로 연환산하면 값이 달라진다.
+**CAGR 산출 기준:** 국내 주식·미국 ETF의 CAGR은 일봉 연 252개, BTC 현물은 1시간봉 연 8,760개 수익률 관측치 기준으로 연환산했다. 전체 기간 성과, Walk-Forward OOS, 동일 기간 비교표 모두 같은 기준이다.
 
 ### 1.3 검증 · 동일 기간 비교
 
