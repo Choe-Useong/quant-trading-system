@@ -68,9 +68,10 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2014.05–2026.04</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>전략 · Rolling</strong><br>CAGR <strong>23.82%</strong><br>MDD -23.55%</td>
-    <td colspan="3" width="50%" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.17%<br>MDD -29.62%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.82%</strong><br>MDD -23.55%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>19.09%</strong><br>MDD -24.82%</td>
   </tr>
+  <tr><td colspan="6" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.17%<br>MDD -29.62%</td></tr>
 </table>
 
 ---
@@ -103,9 +104,10 @@
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2021.09–2026.09</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>전략 · Rolling</strong><br>CAGR <strong>35.56%</strong><br>MDD -36.28%</td>
-    <td colspan="3" width="50%" valign="top"><strong>동일기간 BTC 보유</strong><br>CAGR 17.47%<br>MDD -74.85%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>35.56%</strong><br>MDD -36.28%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>40.75%</strong><br>MDD -36.28%</td>
   </tr>
+  <tr><td colspan="6" valign="top"><strong>동일기간 BTC 보유</strong><br>CAGR 17.47%<br>MDD -74.85%</td></tr>
 </table>
 
 ---
