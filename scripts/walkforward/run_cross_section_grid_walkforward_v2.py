@@ -334,6 +334,25 @@ def _build_folds(
     return folds
 
 
+def _seed_window_start(eval_weight_frame: pd.DataFrame, weight_frame: pd.DataFrame) -> pd.DataFrame:
+    """A window starts with an empty book. Where its first row keeps holdings
+    (NaN), request the latest target each market had by then, so the window
+    enters the portfolio the strategy holds instead of waiting in cash for the
+    next rebalance (change_only output already resolves holds before slicing)."""
+    if eval_weight_frame.empty:
+        return eval_weight_frame
+    first_row = eval_weight_frame.iloc[0]
+    if not bool(first_row.isna().any()):
+        return eval_weight_frame
+    history = weight_frame.loc[weight_frame.index <= eval_weight_frame.index[0], eval_weight_frame.columns]
+    if history.empty:
+        return eval_weight_frame
+    latest = history.ffill().iloc[-1]
+    seeded = eval_weight_frame.copy()
+    seeded.iloc[0] = first_row.fillna(latest).to_numpy(dtype=float)
+    return seeded
+
+
 def _run_v2_backtest_window(
     candle_dir: Path,
     source_cache_dir: Path,
@@ -421,6 +440,8 @@ def _run_v2_backtest_window(
         eval_weight_frame = weight_frame.loc[(weight_frame.index >= eval_start) & (weight_frame.index < eval_end)]
         if change_only_weights:
             eval_weight_frame = to_change_only_target_frame(eval_weight_frame, scope=weight_spec.change_only_scope)
+        elif universe_spec.holding is None:
+            eval_weight_frame = _seed_window_start(eval_weight_frame, weight_frame)
     if eval_weight_frame.empty or not bool(eval_weight_frame.notna().any(axis=1).any()):
         return {"status": "empty_weights"}
 
@@ -537,6 +558,8 @@ def _run_v2_backtest_window(
                 eval_weight_frame.columns,
             ]
             eval_weight_frame = to_change_only_target_frame(eval_weight_frame, scope=weight_spec.change_only_scope)
+        elif sleeve_parts is None and universe_spec.holding is None:
+            eval_weight_frame = _seed_window_start(eval_weight_frame, weight_frame)
         trimmed_start_timestamp = effective_start
         if eval_price_frame.empty or eval_weight_frame.empty:
             return {"status": "empty_weights"}
@@ -697,6 +720,12 @@ def _run_v2_backtest_window(
     if include_curves:
         result["_equity_curve"] = equity_curve
         result["_benchmark_curve"] = aligned_benchmark_curve
+        result["_init_cash"] = init_cash
+        # A single-market benchmark is one price series, so stitching can carry
+        # it across window boundaries; portfolio benchmarks are rebuilt per window.
+        if benchmark_mode == "single_market":
+            source = benchmark_price_frame if benchmark_price_frame is not None else price_frame
+            result["_benchmark_price_series"] = pd.to_numeric(source[benchmark_market], errors="coerce").dropna()
     return result
 
 
@@ -730,12 +759,19 @@ def _stitch_curves(
     *,
     init_cash: float,
     name: str,
+    first_returns: list[float | None] | None = None,
 ) -> pd.Series:
+    """Chain window curves by returns. Each window's first return is 0 unless
+    first_returns gives the change into that window (entry costs for the
+    strategy, the boundary-day move for a single-market benchmark)."""
     if not curves:
         return pd.Series(dtype=float, name=name)
     stitched_returns: list[pd.Series] = []
-    for curve in curves:
+    for idx, curve in enumerate(curves):
         returns = compute_return_series(curve)
+        first_return = first_returns[idx] if first_returns is not None else None
+        if first_return is not None and not returns.empty:
+            returns.iloc[0] = float(first_return)
         stitched_returns.append(returns)
     stitched_return_series = pd.concat(stitched_returns).sort_index()
     stitched_curve = ((1.0 + stitched_return_series).cumprod()) * init_cash
@@ -1124,6 +1160,9 @@ def main() -> None:
     if not fold_winner_frame.empty:
         stitched_equity_segments: list[pd.Series] = []
         stitched_benchmark_segments: list[pd.Series] = []
+        equity_first_returns: list[float | None] = []
+        benchmark_first_returns: list[float | None] = []
+        previous_segment_end: pd.Timestamp | None = None
         segments = _winner_deployment_segments(fold_winner_frame)
         for segment in segments:
             combo = {key: segment.get(key) for key in combo_keys if key in segment}
@@ -1193,9 +1232,27 @@ def main() -> None:
                 **({"preselection": preselection} if preselection is not None else {}),
             )
             if segment_result.get("status") != "ok":
+                previous_segment_end = None
                 continue
-            stitched_equity_segments.append(segment_result["_equity_curve"])
-            stitched_benchmark_segments.append(segment_result["_benchmark_curve"])
+            equity_segment = segment_result["_equity_curve"]
+            benchmark_segment = segment_result["_benchmark_curve"]
+            # Strategy windows start from cash: count the move from init_cash to
+            # the first value (entry fees and slippage).
+            equity_first_returns.append(float(equity_segment.iloc[0]) / float(segment_result["_init_cash"]) - 1.0)
+            # A single-market benchmark keeps holding across adjacent windows,
+            # so its boundary day earns the move from the previous window's last date.
+            benchmark_first_return = None
+            price_series = segment_result.get("_benchmark_price_series")
+            if (price_series is not None and stitched_benchmark_segments
+                    and previous_segment_end == pd.Timestamp(segment["deploy_start"])):
+                prior = price_series.loc[:stitched_benchmark_segments[-1].index[-1]]
+                first_date = benchmark_segment.index[0]
+                if not prior.empty and first_date in price_series.index:
+                    benchmark_first_return = float(price_series.loc[first_date]) / float(prior.iloc[-1]) - 1.0
+            benchmark_first_returns.append(benchmark_first_return)
+            stitched_equity_segments.append(equity_segment)
+            stitched_benchmark_segments.append(benchmark_segment)
+            previous_segment_end = pd.Timestamp(segment["deploy_end"])
 
         if stitched_equity_segments and stitched_benchmark_segments:
             init_cash = float(first_vectorbt_payload.get("init_cash", 1_000_000.0))
@@ -1213,11 +1270,13 @@ def main() -> None:
                 stitched_equity_segments,
                 init_cash=init_cash,
                 name="stitched_oos_equity",
+                first_returns=equity_first_returns,
             )
             stitched_benchmark_curve = _stitch_curves(
                 stitched_benchmark_segments,
                 init_cash=init_cash,
                 name="stitched_oos_benchmark",
+                first_returns=benchmark_first_returns,
             )
             stitched_summary = _build_stitched_summary(
                 stitched_equity_curve,
