@@ -40,16 +40,16 @@
 
 ---
 
-## 미국 ETF · 상승월·추세 지속성
+## 미국 ETF · 1배 ETF 순위 모멘텀
 
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>36.16%</strong><br>MDD <strong>-32.15%</strong><br>Sharpe <strong>1.14</strong><br><br><strong>원화 환산 SSO</strong><br>CAGR 26.63%<br>MDD -56.74%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>21.52%</strong><br>MDD <strong>-21.82%</strong><br>Sharpe <strong>1.19</strong><br><br><strong>원화 환산 SPY</strong><br>CAGR 17.08%<br>MDD -29.62%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>유니버스</strong><br>미국 상장 1배·2배 ETF 33개<br>국가·산업·자산군별 고정 목록</td>
+    <td colspan="3" width="50%" valign="top"><strong>유니버스</strong><br>미국 1배 ETF 17개<br>섹터·국가·금·장기채 고정 목록</td>
     <td colspan="3" width="50%" valign="top"><strong>순위 신호</strong><br>일별 ETF 간 수익률 순위 → 월평균<br>최근 12개월 중 1개월 제외한 11개월 합산</td>
   </tr>
   <tr>
@@ -62,14 +62,14 @@
   </tr>
   <tr><th colspan="6" align="left">02 / 통계 검증</th></tr>
   <tr>
-    <td colspan="2" width="33%" align="center" valign="top"><strong>후보군</strong><br>상승월 기준 9개</td>
-    <td colspan="2" width="33%" align="center" valign="top"><strong>SPA p값</strong><br><strong>0.2508</strong></td>
-    <td colspan="2" width="33%" align="center" valign="top"><strong>PBO</strong><br><strong>10.00%</strong></td>
+    <td colspan="2" width="33%" align="center" valign="top"><strong>후보군</strong><br>모멘텀 · 절대 모멘텀 · 종목 수 (36개)</td>
+    <td colspan="2" width="33%" align="center" valign="top"><strong>SPA p값</strong><br><strong>0.2302</strong></td>
+    <td colspan="2" width="33%" align="center" valign="top"><strong>PBO</strong><br><strong>7.50%</strong></td>
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2014.05–2026.04</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>전략 · Rolling</strong><br>CAGR <strong>32.86%</strong><br>MDD -32.15%</td>
-    <td colspan="3" width="50%" valign="top"><strong>동일기간 SSO</strong><br>CAGR 24.94%<br>MDD -56.74%</td>
+    <td colspan="3" width="50%" valign="top"><strong>전략 · Rolling</strong><br>CAGR <strong>23.82%</strong><br>MDD -23.55%</td>
+    <td colspan="3" width="50%" valign="top"><strong>동일기간 SPY</strong><br>CAGR 17.17%<br>MDD -29.62%</td>
   </tr>
 </table>
 

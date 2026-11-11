@@ -58,14 +58,14 @@
 
 <a name="strategy-us-etf"></a>
 
-## 2. 미국 ETF · 상승월·추세 지속성
+## 2. 미국 ETF · 1배 ETF 순위 모멘텀
 
 ### 2.1 전략 명세
 
 | 항목 | 설정 |
 | --- | --- |
 | 기간 | 2012-05-01 ~ 2026-05-29 |
-| 유니버스 | 국가·산업·자산군별 미국 1배·2배 ETF 33개(고정 목록) |
+| 유니버스 | 미국 1배 ETF 17개(고정 목록): 섹터 12개(IYW·IYE·IYF·IYR·IYH·IYM·IYC·IYK·IDU·IYJ·IBB·IYZ), 국가·규모 3개(EEM·EWJ·IWM), 금·장기채(GLD·TLT) |
 | 순위 신호 | 일별 ETF 간 수익률 순위 → 월평균 → 12개월 중 최근 1개월 제외한 11개월 합산 |
 | 절대 모멘텀 | 126거래일 수익률 > 0% |
 | 상승월 조건 | 최근 20개월 중 상승월 11개월 이상 |
@@ -73,41 +73,44 @@
 | 변동성 필터 | 10일 실현변동성의 252일 자기 백분위 ≤ 97.5% |
 | 종목·비중 | 조건 통과 상위 최대 2개 · 2개면 각 50%, 1개면 100% |
 | 재조정·비용 | 선정 종목 변경 시 · 수수료 0.05% · 슬리피지 0% |
-| 설정 | [상승월 9개 후보·SSO 비교](../configs/stocks/grid_us_etf_positive_month_numeric9_sso_benchmark_v2.json) |
+| 설정 | [1배 ETF 36개 후보 그리드](../configs/stocks/grid_us_etf_1x_sector17_rank_absmom_topn_spy_benchmark_v2.json) |
 
 ### 2.2 백테스트 성과
 
 <table width="100%">
   <tr>
-    <td width="50%" rowspan="7" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 전략과 원화 환산 SSO의 성과 지수 및 낙폭" width="100%"></a></td>
-    <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">원화 환산 SSO</th>
+    <td width="50%" rowspan="7" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 전략과 원화 환산 SPY의 성과 지수 및 낙폭" width="100%"></a></td>
+    <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">원화 환산 SPY</th>
   </tr>
-  <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">7,529.52%</td><td align="right" valign="top">2,652.78%</td></tr>
-  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>36.16%</strong></td><td align="right" valign="top">26.63%</td></tr>
-  <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-32.15%</strong></td><td align="right" valign="top">-56.74%</td></tr>
-  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.14</td><td align="right" valign="top">0.88</td></tr>
-  <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">1.12</td><td align="right" valign="top">0.47</td></tr>
-  <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">338거래일</td><td align="right" valign="top">—</td></tr>
+  <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">1,442.80%</td><td align="right" valign="top">815.76%</td></tr>
+  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>21.52%</strong></td><td align="right" valign="top">17.08%</td></tr>
+  <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-21.82%</strong></td><td align="right" valign="top">-29.62%</td></tr>
+  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.19</td><td align="right" valign="top">1.00</td></tr>
+  <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.99</td><td align="right" valign="top">0.58</td></tr>
+  <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">301거래일</td><td align="right" valign="top">—</td></tr>
 </table>
 
-**비교 기준:** SSO 수정주가를 기존 환율로 원화 환산 · SSO 보유 수익률에는 별도 거래 수수료 미반영.
+**비교 기준:** SPY 수정주가를 기존 환율로 원화 환산(VOO와 같은 S&P 500 추종) · SPY 보유 수익률에는 별도 거래 수수료 미반영.
+
 ### 2.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
 | --- | --- |
-| 후보군 | 상승월 기준 9개: 16개월(8·9·10개월), 20개월(10·11·12개월), 24개월(12·14·15개월) |
-| SPA | SSO 대비 초과수익 · 5,000회 재표집 · **p=0.2508** |
-| PBO | SSO 대비 AIR · 24개월 구간·2개 앵커 · 양방향 40개 조합 · **10.00%** |
-| WF | SSO 대비 AIR로 후보 선택 · Rolling IS 24개월 · STEP/OOS 각 24개월 · 6개 적용 구간 |
+| 후보군 | 모멘텀 9·12·15개월 × 절대 모멘텀 63·126·252일 × 종목 수 1·2·3·5개 = 36개 (상승월·추세 조건 고정) |
+| SPA | SPY 대비 초과수익 · 5,000회 재표집 · **p=0.2302** |
+| PBO | SPY 대비 AIR · 24개월 구간·2개 앵커 · 양방향 40개 조합 · **7.50%** |
+| WF | SPY 대비 AIR로 후보 선택 · Rolling IS 24개월 · STEP/OOS 각 24개월 · 6개 적용 구간 |
 | WF OOS | 2014-05-01 ~ 2026-04-30 |
 
-**동일 기간 성과 (2014-05-01 ~ 2026-04-30 · 3,018거래일)**
+SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확인되지 않았고, 36개 후보 중 정보비율이 양수인 후보는 18개다.
+
+**동일 기간 성과 (2014-05-01 ~ 2026-04-30 · 3,018거래일 · 달력일 연환산)**
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
-| 고정 설정: 20개월 중 상승월 11개월 | 35.86% | -32.15% | 1.13 |
-| WF Rolling | 32.86% | -32.15% | 1.06 |
-| 원화 환산 SSO | 24.94% | -56.74% | 0.82 |
+| 고정 설정: 12개월·절대 모멘텀 126일·2종목 | 22.41% | -21.82% | 1.21 |
+| WF Rolling | 23.82% | -23.55% | 1.16 |
+| 원화 환산 SPY | 17.17% | -29.62% | 0.97 |
 
 ---
 
