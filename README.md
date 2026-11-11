@@ -34,7 +34,7 @@
 
 ## Walk-Forward 표본 외 성과
 
-아래 수치는 **전체 기간 고정 전략 백테스트와 구분되는 OOS 평가 결과**입니다. Rolling은 학습 창을 이동하고, Expanding은 학습 시작 시점을 고정해 자료를 누적합니다. 전체 기간 국내 주식·미국 ETF CAGR은 일봉 연 252개 관측치, BTC 현물은 1시간봉 연 8,760개 관측치를 기준으로 산출한 반면, 아래 Walk-Forward CAGR은 별도 OOS 구간을 달력일 기준으로 연환산했습니다. 따라서 전체 기간 CAGR과 동일한 기간·산출 방식의 수치로 해석하지 않아야 합니다. 세부 기간·후보 선택 기준은 [전략별 상세 보고서](notes/strategy_examples.md)에 기재했습니다.
+아래 표는 **Walk-Forward 표본 외(OOS) 평가 결과**입니다. Rolling은 학습 구간을 이동하고, Expanding은 학습 시작 시점을 고정한 채 자료를 누적합니다. 전체 기간 국내 주식·미국 ETF CAGR은 일봉 연 252개 관측치, BTC 현물은 1시간봉 연 8,760개 관측치로 연환산했습니다. 반면 Walk-Forward CAGR은 각 OOS 평가기간의 실제 달력일 수를 사용했습니다. 따라서 두 결과를 비교할 때는 평가기간과 계산 방식의 차이를 고려해야 합니다. 세부 설정은 [전략별 상세 보고서](notes/strategy_examples.md)를 참고하세요.
 
 | 전략 | OOS 기간 | Rolling CAGR / MDD | Expanding CAGR / MDD | 동일기간 비교 대상 CAGR |
 | --- | --- | ---: | ---: | ---: |
