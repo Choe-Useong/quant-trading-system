@@ -13,6 +13,7 @@ from lib.storage import write_candles_csv, write_market_manifest
 from lib.upbit_collector import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_PAUSE_SECONDS,
+    EXCHANGE_BASE_URLS,
     collect_daily_candles,
     list_markets,
 )
@@ -20,7 +21,13 @@ from lib.upbit_collector import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download Upbit daily candles and save them as per-market CSV files."
+        description="Download Upbit (or Bithumb) daily candles and save them as per-market CSV files."
+    )
+    parser.add_argument(
+        "--exchange",
+        choices=sorted(EXCHANGE_BASE_URLS),
+        default="upbit",
+        help="Exchange with the Upbit-style /v1 API. Bithumb daily candles start at 00:00 KST (15:00 UTC)",
     )
     parser.add_argument(
         "--quote",
@@ -63,8 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--out-dir",
-        default="data/upbit",
-        help="Base output directory",
+        default=None,
+        help="Base output directory (default data/<exchange>)",
     )
     return parser
 
@@ -73,11 +80,13 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.out_dir or f"data/{args.exchange}")
+    base_url = EXCHANGE_BASE_URLS[args.exchange]
     daily_dir = out_dir / "daily"
     markets = list_markets(
         quote=args.quote,
         include_warnings=not args.exclude_warnings,
+        base_url=base_url,
     )
 
     if args.markets:
@@ -95,6 +104,7 @@ def main() -> None:
             days=args.days,
             batch_size=args.batch_size,
             pause_seconds=args.pause_seconds,
+            base_url=base_url,
         )
         row_count = write_candles_csv(daily_dir / f"{market.market}.csv", candles)
         print(f"[{idx}/{len(markets)}] {market.market}: saved {row_count} rows")

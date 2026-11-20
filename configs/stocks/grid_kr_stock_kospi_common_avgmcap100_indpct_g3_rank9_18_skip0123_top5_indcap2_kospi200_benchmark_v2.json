@@ -385,6 +385,10 @@
     "trim_start_timestamp": "2016-01-01 00:00:00",
     "execution_availability": {
       "volume_column": "candle_acc_trade_volume"
+    },
+    "risk_free_rate": {
+      "file": "data/macro/risk_free_rates_wide.csv",
+      "column": "KR_CD91"
     }
   },
   "grid": {

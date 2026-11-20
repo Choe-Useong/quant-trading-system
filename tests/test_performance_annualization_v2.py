@@ -220,6 +220,141 @@ class LongShortEqualV2Test(unittest.TestCase):
         self.assertIn("long_scale", kept)
         self.assertNotIn("dead", kept)
 
+    def leg_weight_case(self):
+        index = pd.date_range("2024-01-01", periods=3, freq="h")
+        columns = list("ABCDEF")
+        scores = pd.DataFrame([[1., 1., 1., -1., -1., 0.]] * 3, index=index, columns=columns)
+        weights = pd.DataFrame([[1., 2., 1., 1., 3., np.nan],
+                                [2., 2., 4., 1., 1., np.nan],
+                                [1., 1., 2., 3., 1., np.nan]], index=index, columns=columns)
+        return scores, {"side": scores, "w": weights}
+
+    def test_leg_weights_normalize_inside_each_side_and_keep_side_totals(self):
+        from lib.spec_io import load_weight_spec_from_payload
+        from lib.weights_v2 import build_weight_frame_v2
+        scores, frames = self.leg_weight_case()
+        base = dict(weighting="long_short_equal", position_score_feature="side",
+                    rebalance_frequency="every_bar", long_exposure=.8, short_exposure=.4)
+        spec = load_weight_spec_from_payload({**base, "long_weight_feature": "w", "short_weight_feature": "w"})
+        actual = build_weight_frame_v2(scores.notna(), spec, frames)
+        # Row 0: longs 1:2:1 of .8, shorts 1:3 of .4; F is unselected, its NaN unused.
+        np.testing.assert_allclose(actual.iloc[0], [.2, .4, .2, -.1, -.3, 0.])
+        np.testing.assert_allclose(actual.iloc[1], [.2, .2, .4, -.2, -.2, 0.])
+        np.testing.assert_allclose(actual.clip(lower=0).sum(axis=1), .8)
+        np.testing.assert_allclose(actual.clip(upper=0).sum(axis=1), -.4)
+        # One side weighted, the other side stays equal.
+        long_only = build_weight_frame_v2(scores.notna(), load_weight_spec_from_payload(
+            {**base, "long_weight_feature": "w"}), frames)
+        np.testing.assert_allclose(long_only.iloc[0], [.2, .4, .2, -.2, -.2, 0.])
+        # Column order does not matter.
+        reordered = scores.columns[::-1]
+        permuted = build_weight_frame_v2(scores[reordered].notna(), spec, frames)
+        pd.testing.assert_frame_equal(actual, permuted[actual.columns])
+        # Side and common multipliers apply after the split, as for equal legs.
+        index = scores.index
+        scaled = build_weight_frame_v2(scores.notna(), load_weight_spec_from_payload(
+            {**base, "long_weight_feature": "w", "short_weight_feature": "w",
+             "long_exposure_feature": "half", "gross_exposure_feature": "common"}),
+            {**frames, "half": pd.DataFrame(.5, index=index, columns=["m"]),
+             "common": pd.DataFrame(.5, index=index, columns=["m"])})
+        np.testing.assert_allclose(scaled.iloc[0], [.05, .1, .05, -.05, -.15, 0.])
+        # Weights on rank-filter legs use the final filtered members.
+        rank = lambda bucket: dict(feature_column="side", mode="quantile", quantiles=2,
+                                   bucket_values=[bucket], ascending=True, scope="global")
+        filtered = build_weight_frame_v2(scores.notna(), load_weight_spec_from_payload(dict(
+            weighting="long_short_equal", rebalance_frequency="every_bar", long_filter=rank(2),
+            short_filter=rank(1), long_weight_feature="w")), frames, base_eligible_mask=scores.notna())
+        self.assertEqual(filtered.iloc[0].gt(0).sum(), 3)
+        np.testing.assert_allclose(filtered.iloc[0][list("ABC")], [.125, .25, .125])
+
+    def test_leg_weights_unset_keep_equal_results_and_old_names(self):
+        from hashlib import sha256
+        from lib.spec_io import load_weight_spec_from_payload
+        from lib.weights_v2 import build_weight_frame_v2
+        scores, frames = self.leg_weight_case()
+        base = dict(weighting="long_short_equal", position_score_feature="side", rebalance_frequency="weekly")
+        baseline = load_weight_spec_from_payload(base)
+        token = sha256(repr(("side", 0, None, None)).encode()).hexdigest()[:16]
+        self.assertTrue(baseline.resolved_name().endswith(f"_long0.5_short0.5_{token}"))
+        weighted = load_weight_spec_from_payload({**base, "short_weight_feature": "w"})
+        lagged = load_weight_spec_from_payload({**base, "short_weight_feature": "w", "short_weight_lag": 1})
+        self.assertEqual(len({baseline.resolved_name(), weighted.resolved_name(), lagged.resolved_name()}), 3)
+        # Equal multipliers reproduce the equal split.
+        ones = {**frames, "w": frames["w"] * 0 + 3.}
+        pd.testing.assert_frame_equal(
+            build_weight_frame_v2(scores.notna(), weighted, ones),
+            build_weight_frame_v2(scores.notna(), baseline, frames), check_exact=False, rtol=1e-12)
+
+    def test_leg_weight_lag_is_causal(self):
+        from lib.spec_io import load_weight_spec_from_payload
+        from lib.weights_v2 import build_weight_frame_v2
+        scores, frames = self.leg_weight_case()
+        spec = load_weight_spec_from_payload(dict(weighting="long_short_equal", position_score_feature="side",
+            rebalance_frequency="every_bar", long_weight_feature="w", long_weight_lag=1))
+        selected = scores.notna()
+        selected.iloc[0] = False
+        actual = build_weight_frame_v2(selected, spec, frames)
+        self.assertTrue(actual.iloc[0].eq(0).all())
+        # Row 1 uses row 0 weights 1:2:1; row 2 uses row 1 weights 2:2:4.
+        np.testing.assert_allclose(actual.iloc[1][list("ABC")], [.125, .25, .125])
+        np.testing.assert_allclose(actual.iloc[2][list("ABC")], [.125, .125, .25])
+        changed = {k: v.copy() for k, v in frames.items()}
+        changed["w"].iloc[-1] = 9.
+        pd.testing.assert_frame_equal(actual, build_weight_frame_v2(selected, spec, changed))
+        prefix = build_weight_frame_v2(selected.iloc[:2], spec, {k: v.iloc[:2] for k, v in frames.items()})
+        pd.testing.assert_frame_equal(actual.iloc[:2], prefix)
+        # Without a row-0 mask the lagged prefix is missing for selected markets.
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            build_weight_frame_v2(scores.notna(), spec, frames)
+
+    def test_leg_weights_reject_invalid_values_and_options(self):
+        from lib.spec_io import load_weight_spec_from_payload
+        from lib.weights_v2 import build_weight_frame_v2
+        scores, frames = self.leg_weight_case()
+        base = dict(weighting="long_short_equal", position_score_feature="side",
+                    rebalance_frequency="every_bar", short_weight_feature="w")
+        spec = load_weight_spec_from_payload(base)
+        for value in (np.nan, 0., -1., np.inf):
+            bad = {**frames, "w": frames["w"].copy()}
+            bad["w"].iloc[1, 4] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, r"for E at 2024-01-01 01:00"):
+                build_weight_frame_v2(scores.notna(), spec, bad)
+        missing_column = {**frames, "w": frames["w"].drop(columns="D")}
+        with self.assertRaisesRegex(ValueError, "for D"):
+            build_weight_frame_v2(scores.notna(), spec, missing_column)
+        with self.assertRaisesRegex(ValueError, "Missing short weight feature"):
+            build_weight_frame_v2(scores.notna(), spec, {"side": scores})
+        for change in (dict(short_weight_lag=-1), dict(short_weight_lag=True), dict(short_weight_lag=.5),
+                       dict(short_weight_feature=""), dict(short_weight_feature=None, short_weight_lag=1),
+                       dict(weighting="equal"), dict(rebalance_frequency="change_only"),
+                       dict(rebalance_frequency="weekly", output_mode="change_only")):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                build_weight_frame_v2(scores.notna(), load_weight_spec_from_payload({**base, **change}), frames)
+
+    def test_leg_weights_feed_target_average_and_grid_retention(self):
+        from lib.spec_io import load_weight_spec_from_payload
+        from lib.weights_v2 import build_weight_frame_v2
+        from scripts.run_cross_section_grid_v2 import _retain_shared_feature_frames
+        index = pd.date_range("2024-01-01", periods=72, freq="h")
+        scores = pd.DataFrame({"A": 1., "B": 1., "C": -1.}, index=index)
+        weights = pd.DataFrame({"A": 1., "B": 1., "C": 1.}, index=index)
+        weights.loc[index[24]:, "A"] = 3.
+        spec = load_weight_spec_from_payload(dict(weighting="long_short_equal", position_score_feature="side",
+            long_weight_feature="w", target_average=dict(periods=2, frequency="1d")))
+        actual = build_weight_frame_v2(scores.notna(), spec, {"side": scores, "w": weights})
+        # Daily targets A/B: day0 .25/.25, day1 .375/.125; mean of two latest days.
+        np.testing.assert_allclose(actual.iloc[0], [.25, .25, -.5])
+        np.testing.assert_allclose(actual.iloc[24], [.3125, .1875, -.5])
+        np.testing.assert_allclose(actual.iloc[48], [.375, .125, -.5])
+        self.assertTrue(actual.iloc[1:24].isna().all().all())
+        frames = {k: pd.DataFrame(1., index=index[:2], columns=["A"]) for k in ("side", "risk_w", "dead")}
+        config = dict(run_name_template="case_{w}", universe_spec_template=dict(feature_column="side", mode="all"),
+                      weight_spec_template=dict(weighting="long_short_equal", position_score_feature="side",
+                                                rebalance_frequency="weekly", short_weight_feature="{w}"))
+        kept = _retain_shared_feature_frames(frames, config, [dict(w="risk_w")], None)
+        self.assertIn("risk_w", kept)
+        self.assertNotIn("dead", kept)
+
     def test_sequential_caps_rank_inside_each_independent_cross_group(self):
         from lib.spec_io import load_weight_spec_from_payload
         from lib.weights_v2 import build_weight_frame_v2

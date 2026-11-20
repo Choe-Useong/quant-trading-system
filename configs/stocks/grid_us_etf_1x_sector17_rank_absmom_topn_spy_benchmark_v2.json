@@ -260,7 +260,11 @@
     "benchmark_mode": "single_market",
     "trim_start_mode": "timestamp",
     "trim_start_timestamp": "2012-05-01 00:00:00",
-    "benchmark_source_cache_dir": "data/stocks_cache/global_etf_1x_2x_sector17_spy_daily_end20260529"
+    "benchmark_source_cache_dir": "data/stocks_cache/global_etf_1x_2x_sector17_spy_daily_end20260529",
+    "risk_free_rate": {
+      "file": "data/macro/risk_free_rates_wide.csv",
+      "column": "KR_CD91"
+    }
   },
   "grid": {
     "rank_months": [

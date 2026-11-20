@@ -302,6 +302,7 @@
     "universe_name": "{run_name}"
   },
   "vectorbt_spec_template": {
+    "execution_availability": {"volume_column": "candle_acc_trade_volume"},
     "price_column": "trade_price",
     "benchmark_price_column": "index_price",
     "fees": 0.0015,

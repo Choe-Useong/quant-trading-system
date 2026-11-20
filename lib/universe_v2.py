@@ -25,6 +25,8 @@ def validate_holding_selection_config(universe: UniverseSpec, weight, backtest: 
     """Keep the optional target holding clock ahead of allocation and execution."""
     if universe.holding is None:
         return
+    if getattr(weight, "target_average", None) is not None:
+        raise ValueError("universe.holding cannot be combined with weight target_average")
     if weight.weighting != "fixed" or weight.position_score_feature is not None:
         raise ValueError("universe.holding requires fixed weighting without position_score_feature")
     if weight.fixed_weight is None or not np.isfinite(weight.fixed_weight) or weight.fixed_weight == 0:

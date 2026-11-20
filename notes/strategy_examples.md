@@ -8,7 +8,8 @@
 
 | 항목 | 설정 |
 | --- | --- |
-| 기간 | 2016-01-04 ~ 2026-09-21 |
+| 기간 | 2016-01-04 ~ 2026-11-19 |
+| 가격 데이터 | KRX 정규장 종가 · KRX 기준가 수정계수 반영 · 상장폐지 종목 포함 |
 | 유니버스 | KOSPI 보통주 · 전월 평균 시가총액 상위 100개 |
 | 업종 기준 | 전월 말 업종 분류 · 동일 업종 3종목 이상 |
 | 신호 계산 | 일별 수익률의 업종 내 백분위 → 월평균 |
@@ -23,27 +24,29 @@
 
 <table width="100%">
   <tr>
-    <td width="50%" rowspan="8" valign="top"><a href="assets/kr_stock_case.png"><img src="assets/kr_stock_case.png" alt="국내 주식 전략과 KOSPI200의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" rowspan="10" valign="top"><a href="assets/kr_stock_case.png"><img src="assets/kr_stock_case.png" alt="국내 주식 전략과 KOSPI200의 성과 지수 및 낙폭" width="100%"></a></td>
     <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">KOSPI200</th>
   </tr>
-  <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">2,685.08%</td><td align="right" valign="top">374.01%</td></tr>
-  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>37.56%</strong></td><td align="right" valign="top">16.09%</td></tr>
-  <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-57.79%</strong></td><td align="right" valign="top">-41.19%</td></tr>
-  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.22</td><td align="right" valign="top">0.72</td></tr>
-  <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.65</td><td align="right" valign="top">0.39</td></tr>
-  <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">745거래일</td><td align="right" valign="top">—</td></tr>
-  <tr><td align="left" valign="top">순손익 집중</td><td align="right" valign="top">SK하이닉스·SK스퀘어·삼성전자 합계 45.6%</td><td align="right" valign="top">—</td></tr>
+  <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">1,904.74%</td><td align="right" valign="top">240.78%</td></tr>
+  <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>32.73%</strong></td><td align="right" valign="top">12.28%</td></tr>
+  <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-54.52%</strong></td><td align="right" valign="top">-47.82%</td></tr>
+  <tr><td align="left" valign="top">연환산 변동성</td><td align="right" valign="top">30.50%</td><td align="right" valign="top">25.65%</td></tr>
+  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.01</td><td align="right" valign="top">0.50</td></tr>
+  <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.60</td><td align="right" valign="top">0.26</td></tr>
+  <tr><td align="left" valign="top">정보비율(IR)</td><td align="right" valign="top">0.80</td><td align="right" valign="top">—</td></tr>
+  <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">675거래일</td><td align="right" valign="top">—</td></tr>
+  <tr><td align="left" valign="top">순손익 집중</td><td align="right" valign="top">SK스퀘어·SK하이닉스·효성중공업 합계 65.5%</td><td align="right" valign="top">—</td></tr>
 </table>
 
-**CAGR 산출 기준:** 국내 주식·미국 ETF는 일봉 연 252개, BTC 현물은 1시간봉 연 8,760개 수익률 관측치로 연환산했다. 전체 기간 성과와 Walk-Forward OOS에도 같은 연환산 계수를 사용한다. 동일 기간 비교표의 고정 설정·벤치마크는 비교 구간 첫 관측값을 기준으로 계산했고, Walk-Forward Rolling·Expanding은 초기자금을 기준으로 첫 봉 진입 비용까지 반영한 OOS 성과다.
+**지표 산출 기준:** 국내 주식·미국 ETF는 일봉 연 252개, BTC 현물은 1시간봉 연 8,760개 수익률 관측치로 CAGR·변동성·Sharpe·IR을 연환산했다. 전체 기간 성과와 Walk-Forward OOS에도 같은 연환산 계수를 사용한다. 동일 기간 비교표의 고정 설정·벤치마크는 비교 구간 첫 관측값을 기준으로 계산했고, Walk-Forward Rolling·Expanding은 초기자금을 기준으로 첫 봉 진입 비용까지 반영한 OOS 성과다. Sharpe는 무위험수익률을 뺀 초과수익 기준이며, 국내 주식·미국 ETF·BTC 현물은 원화 수익률이므로 원화 CD 91일물(한국은행 ECOS), 알트코인 선물은 USDT 수익률이므로 미국 3개월 국채(FRED DTB3)를 쓴다. IR은 벤치마크 대비 일별 초과수익의 평균을 표준편차로 나눠 연환산한 값이다.
 
 ### 1.3 검증 · 동일 기간 비교
 
 | 검증 | 설정·결과 |
 | --- | --- |
 | 후보군 | 모멘텀 9·12·15·18개월 × 최근 제외 0·1·2·3개월 = 16개 |
-| SPA | 5,000회 재표집 · **p=0.0246** |
-| PBO | 12개월 구간 10개 · 양방향 252개 조합 · **19.44%** |
+| SPA | 5,000회 재표집 · **p=0.0272** |
+| PBO | 12개월 구간 10개 · 양방향 252개 조합 · **15.08%** |
 | WF | IS 24개월 · STEP 12개월 · OOS 12개월, 8개 적용 구간 · Rolling / Expanding |
 | WF OOS | 2018-01-04 ~ 2026-01-02 |
 
@@ -51,10 +54,10 @@
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
-| 고정 설정: 12개월·3개월 제외 | 28.90% | -57.46% | 1.04 |
-| WF Rolling | 23.10% | -53.33% | 0.88 |
-| WF Expanding | 26.67% | -48.16% | 0.99 |
-| KOSPI200 | 8.77% | -41.05% | 0.52 |
+| 고정 설정: 12개월·3개월 제외 | 30.94% | -54.52% | 1.01 |
+| WF Rolling | 20.19% | -64.55% | 0.70 |
+| WF Expanding | 21.94% | -58.86% | 0.74 |
+| KOSPI200 | 8.77% | -41.05% | 0.41 |
 
 ---
 
@@ -81,14 +84,16 @@
 
 <table width="100%">
   <tr>
-    <td width="50%" rowspan="7" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 전략과 원화 환산 SPY의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" rowspan="9" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 전략과 원화 환산 SPY의 성과 지수 및 낙폭" width="100%"></a></td>
     <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">원화 환산 SPY</th>
   </tr>
   <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">1,442.80%</td><td align="right" valign="top">815.76%</td></tr>
   <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>21.50%</strong></td><td align="right" valign="top">17.08%</td></tr>
   <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-21.82%</strong></td><td align="right" valign="top">-29.62%</td></tr>
-  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.19</td><td align="right" valign="top">1.00</td></tr>
+  <tr><td align="left" valign="top">연환산 변동성</td><td align="right" valign="top">17.72%</td><td align="right" valign="top">17.34%</td></tr>
+  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.07</td><td align="right" valign="top">0.87</td></tr>
   <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">0.99</td><td align="right" valign="top">0.58</td></tr>
+  <tr><td align="left" valign="top">정보비율(IR)</td><td align="right" valign="top">0.27</td><td align="right" valign="top">—</td></tr>
   <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">301거래일</td><td align="right" valign="top">—</td></tr>
 </table>
 
@@ -110,10 +115,10 @@ SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
-| 고정 설정: 12개월·절대 모멘텀 126일·2종목 | 22.46% | -21.82% | 1.21 |
-| WF Rolling | 23.84% | -23.55% | 1.16 |
-| WF Expanding | 19.10% | -24.82% | 0.98 |
-| 원화 환산 SPY | 17.21% | -29.62% | 0.97 |
+| 고정 설정: 12개월·절대 모멘텀 126일·2종목 | 22.46% | -21.82% | 1.10 |
+| WF Rolling | 23.84% | -23.55% | 1.06 |
+| WF Expanding | 19.10% | -24.82% | 0.88 |
+| 원화 환산 SPY | 17.21% | -29.62% | 0.86 |
 
 ---
 
@@ -139,14 +144,16 @@ SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확
 
 <table width="100%">
   <tr>
-    <td width="50%" rowspan="7" valign="top"><a href="assets/btc_spot_case.png"><img src="assets/btc_spot_case.png" alt="BTC 현물 전략과 BTC 보유의 성과 지수 및 낙폭" width="100%"></a></td>
+    <td width="50%" rowspan="9" valign="top"><a href="assets/btc_spot_case.png"><img src="assets/btc_spot_case.png" alt="BTC 현물 전략과 BTC 보유의 성과 지수 및 낙폭" width="100%"></a></td>
     <th width="16%" align="left">지표</th><th width="17%" align="right">전략</th><th width="17%" align="right">BTC 보유</th>
   </tr>
   <tr><td align="left" valign="top">누적수익률</td><td align="right" valign="top">6,333.00%</td><td align="right" valign="top">924.93%</td></tr>
   <tr><td align="left" valign="top">CAGR</td><td align="right" valign="top"><strong>80.03%</strong></td><td align="right" valign="top">38.90%</td></tr>
   <tr><td align="left" valign="top">MDD</td><td align="right" valign="top"><strong>-35.78%</strong></td><td align="right" valign="top">-74.85%</td></tr>
-  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.91</td><td align="right" valign="top">0.88</td></tr>
+  <tr><td align="left" valign="top">연환산 변동성</td><td align="right" valign="top">33.77%</td><td align="right" valign="top">53.38%</td></tr>
+  <tr><td align="left" valign="top">Sharpe</td><td align="right" valign="top">1.84</td><td align="right" valign="top">0.84</td></tr>
   <tr><td align="left" valign="top">Calmar</td><td align="right" valign="top">2.24</td><td align="right" valign="top">0.52</td></tr>
+  <tr><td align="left" valign="top">정보비율(IR)</td><td align="right" valign="top">0.42</td><td align="right" valign="top">—</td></tr>
   <tr><td align="left" valign="top">최장 회복기간</td><td align="right" valign="top">12,224시간</td><td align="right" valign="top">—</td></tr>
 </table>
 
@@ -164,10 +171,10 @@ SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확
 
 | 방식 | CAGR | MDD | Sharpe |
 | --- | ---: | ---: | ---: |
-| 고정 설정: SMA 10·120시간·95백분위 | 47.01% | -35.78% | 1.47 |
-| WF Rolling | 35.53% | -36.28% | 1.20 |
-| WF Expanding | 40.72% | -36.28% | 1.31 |
-| BTC 보유 | 17.47% | -74.85% | 0.58 |
+| 고정 설정: SMA 10·120시간·95백분위 | 47.01% | -35.78% | 1.37 |
+| WF Rolling | 35.53% | -36.28% | 1.10 |
+| WF Expanding | 40.72% | -36.28% | 1.21 |
+| BTC 보유 | 17.47% | -74.85% | 0.52 |
 
 ---
 
@@ -195,16 +202,18 @@ SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확
 <table width="100%">
   <tr>
     <td width="50%" rowspan="8" valign="top"><a href="assets/alt_ls9_72_top5_index.png"><img src="assets/alt_ls9_72_top5_index.png" alt="상위 5개 롱숏 조합과 BTC 보유 성과·낙폭" width="100%"></a></td>
-    <th width="22%" align="left">순위 · 롱 그룹</th><th width="9%" align="right">CAGR</th><th width="10%" align="right">MDD</th><th width="9%" align="right">Sharpe</th>
+    <th width="18%" align="left">순위 · 롱 그룹</th><th width="8%" align="right">CAGR</th><th width="8%" align="right">MDD</th><th width="8%" align="right">변동성</th><th width="8%" align="right">Sharpe</th><th width="8%" align="right">IR</th>
   </tr>
-  <tr><td align="left" valign="top">1 · 하위 / 하위</td><td align="right" valign="top"><strong>40.88%</strong></td><td align="right" valign="top">-35.05%</td><td align="right" valign="top">1.32</td></tr>
-  <tr><td align="left" valign="top">2 · 하위 / 중간</td><td align="right" valign="top">28.14%</td><td align="right" valign="top">-29.19%</td><td align="right" valign="top">1.11</td></tr>
-  <tr><td align="left" valign="top">3 · 상위 / 상위</td><td align="right" valign="top">27.44%</td><td align="right" valign="top">-41.91%</td><td align="right" valign="top">1.00</td></tr>
-  <tr><td align="left" valign="top">4 · 중간 / 상위</td><td align="right" valign="top">25.00%</td><td align="right" valign="top">-42.57%</td><td align="right" valign="top">0.92</td></tr>
-  <tr><td align="left" valign="top">5 · 중간 / 하위</td><td align="right" valign="top">20.74%</td><td align="right" valign="top">-44.99%</td><td align="right" valign="top">0.83</td></tr>
-  <tr><td align="left" valign="top">비교 · BTC 보유</td><td align="right" valign="top">42.55%</td><td align="right" valign="top">-77.24%</td><td align="right" valign="top">0.89</td></tr>
-  <tr><td colspan="4" align="left"><strong>1~5위 숏 그룹: 거래대금 상위 / 수익률 하위</strong></td></tr>
+  <tr><td align="left" valign="top">1 · 하위 / 하위</td><td align="right" valign="top"><strong>40.88%</strong></td><td align="right" valign="top">-35.05%</td><td align="right" valign="top">29.23%</td><td align="right" valign="top">1.22</td><td align="right" valign="top">-0.22</td></tr>
+  <tr><td align="left" valign="top">2 · 하위 / 중간</td><td align="right" valign="top">28.14%</td><td align="right" valign="top">-29.19%</td><td align="right" valign="top">25.13%</td><td align="right" valign="top">1.00</td><td align="right" valign="top">-0.38</td></tr>
+  <tr><td align="left" valign="top">3 · 상위 / 상위</td><td align="right" valign="top">27.44%</td><td align="right" valign="top">-41.91%</td><td align="right" valign="top">28.39%</td><td align="right" valign="top">0.90</td><td align="right" valign="top">-0.38</td></tr>
+  <tr><td align="left" valign="top">4 · 중간 / 상위</td><td align="right" valign="top">25.00%</td><td align="right" valign="top">-42.57%</td><td align="right" valign="top">28.94%</td><td align="right" valign="top">0.82</td><td align="right" valign="top">-0.40</td></tr>
+  <tr><td align="left" valign="top">5 · 중간 / 하위</td><td align="right" valign="top">20.74%</td><td align="right" valign="top">-44.99%</td><td align="right" valign="top">27.05%</td><td align="right" valign="top">0.73</td><td align="right" valign="top">-0.46</td></tr>
+  <tr><td align="left" valign="top">비교 · BTC 보유</td><td align="right" valign="top">42.55%</td><td align="right" valign="top">-77.24%</td><td align="right" valign="top">60.71%</td><td align="right" valign="top">0.84</td><td align="right" valign="top">—</td></tr>
+  <tr><td colspan="6" align="left"><strong>1~5위 숏 그룹: 거래대금 상위 / 수익률 하위</strong></td></tr>
 </table>
+
+**IR 해석:** IR은 BTC 보유 대비 연환산 값이다. 롱·숏이 시장 방향을 상쇄하는 시장중립형 구조라 BTC를 따라가는 전략이 아니므로 참고용이다.
 
 ### 4.3 조합 평가 · 주요 특성
 

@@ -7,7 +7,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/kr_stock_case.png"><img src="assets/kr_stock_case.png" alt="국내 주식 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2016.01–2026.09<br><br><strong>전략 성과</strong><br>CAGR <strong>37.56%</strong><br>MDD <strong>-57.79%</strong><br>Sharpe <strong>1.22</strong><br><br><strong>KOSPI200</strong><br>CAGR 16.09%<br>MDD -41.19%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2016.01–2026.11<br><br><strong>전략 성과</strong><br>CAGR <strong>32.73%</strong><br>MDD <strong>-54.52%</strong><br>Sharpe <strong>1.01</strong><br><br><strong>KOSPI200</strong><br>CAGR 12.28%<br>MDD -47.82%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
@@ -29,13 +29,13 @@
   <tr><th colspan="6" align="left">02 / 통계 검증</th></tr>
   <tr>
     <td colspan="2" width="33%" align="center" valign="top"><strong>후보군</strong><br>모멘텀 9·12·15·18개월<br>최근 제외 0·1·2·3개월 (16개)</td>
-    <td colspan="2" width="33%" align="center" valign="top"><strong>SPA p값</strong><br><strong>0.0246</strong></td>
-    <td colspan="2" width="33%" align="center" valign="top"><strong>PBO</strong><br><strong>19.44%</strong></td>
+    <td colspan="2" width="33%" align="center" valign="top"><strong>SPA p값</strong><br><strong>0.0272</strong></td>
+    <td colspan="2" width="33%" align="center" valign="top"><strong>PBO</strong><br><strong>15.08%</strong></td>
   </tr>
   <tr><th colspan="6" align="left">Walk-Forward · 2018.01–2026.01</th></tr>
   <tr>
-    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>23.10%</strong><br>MDD -53.33%</td>
-    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>26.67%</strong><br>MDD -48.16%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Rolling</strong><br>CAGR <strong>20.19%</strong><br>MDD -64.55%</td>
+    <td colspan="3" width="50%" valign="top"><strong>Expanding</strong><br>CAGR <strong>21.94%</strong><br>MDD -58.86%</td>
   </tr>
   <tr><td colspan="6" valign="top"><strong>동일기간 KOSPI200</strong><br>CAGR 8.77%<br>MDD -41.05%</td></tr>
 </table>
@@ -47,7 +47,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/us_etf_case.png"><img src="assets/us_etf_case.png" alt="미국 ETF 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>21.50%</strong><br>MDD <strong>-21.82%</strong><br>Sharpe <strong>1.19</strong><br><br><strong>원화 환산 SPY</strong><br>CAGR 17.08%<br>MDD -29.62%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2012.05–2026.05<br><br><strong>전략 성과</strong><br>CAGR <strong>21.50%</strong><br>MDD <strong>-21.82%</strong><br>Sharpe <strong>1.07</strong><br><br><strong>원화 환산 SPY</strong><br>CAGR 17.08%<br>MDD -29.62%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
@@ -83,7 +83,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/btc_spot_case.png"><img src="assets/btc_spot_case.png" alt="BTC 현물 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2019.09–2026.10<br><br><strong>전략 성과</strong><br>CAGR <strong>80.03%</strong><br>MDD <strong>-35.78%</strong><br>Sharpe <strong>1.91</strong><br><br><strong>BTC 단순 보유</strong><br>CAGR 38.90%<br>MDD -74.85%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2019.09–2026.10<br><br><strong>전략 성과</strong><br>CAGR <strong>80.03%</strong><br>MDD <strong>-35.78%</strong><br>Sharpe <strong>1.84</strong><br><br><strong>BTC 단순 보유</strong><br>CAGR 38.90%<br>MDD -74.85%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>
@@ -119,7 +119,7 @@
 <table width="100%">
   <tr>
     <td colspan="4" width="70%" valign="top"><a href="assets/alt_futures_case_preview.png"><img src="assets/alt_futures_case_preview.png" alt="알트코인 선물 롱숏 백테스트 성과 및 낙폭" width="1100"></a></td>
-    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2020.01–2026.10<br>전체 기간 누적수익률 1위 조합<br><br><strong>전략 성과</strong><br>CAGR <strong>40.88%</strong><br>MDD <strong>-35.05%</strong><br>Sharpe <strong>1.32</strong><br><br><strong>BTC 가격 보유</strong><br>CAGR 42.55%<br>MDD -77.24%</td>
+    <td colspan="2" width="30%" valign="top"><strong>전체 기간</strong><br>2020.01–2026.10<br>전체 기간 누적수익률 1위 조합<br><br><strong>전략 성과</strong><br>CAGR <strong>40.88%</strong><br>MDD <strong>-35.05%</strong><br>Sharpe <strong>1.22</strong><br><br><strong>BTC 가격 보유</strong><br>CAGR 42.55%<br>MDD -77.24%</td>
   </tr>
   <tr><th colspan="6" align="left">01 / 전략 구성</th></tr>
   <tr>

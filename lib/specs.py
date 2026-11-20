@@ -174,6 +174,29 @@ class DefensiveSleeveSpec:
 
 
 @dataclass(frozen=True)
+class TargetAverageSpec:
+    """Average the targets computed on a schedule (staggered rebalancing).
+
+    mean: equal-weight mean of the latest `periods` schedule targets; before
+    `periods` targets exist the first one fills the gap (weekday sleeves all
+    rebalance on the first data row). ewm: start at the first target and move
+    1/periods of the way to each new schedule target.
+    """
+    periods: int
+    frequency: str = "1d"
+    method: str = "mean"
+
+    def __post_init__(self):
+        if type(self.periods) is not int or self.periods < 1:
+            raise ValueError("target_average.periods must be a positive integer")
+        if self.method not in ("mean", "ewm"):
+            raise ValueError("target_average.method must be 'mean' or 'ewm'")
+        frequency = str(self.frequency).strip().lower()
+        if not frequency or frequency in {"change_only", "change-only"}:
+            raise ValueError("target_average.frequency must be a rebalance schedule, not change_only")
+
+
+@dataclass(frozen=True)
 class PortfolioVolTargetSpec:
     price_feature: str = "signal_price"
     window: int = 40
@@ -325,12 +348,19 @@ class WeightSpec:
     short_exposure_feature: str | None = None
     long_exposure_lag: int = 0
     short_exposure_lag: int = 0
+    long_weight_feature: str | None = None
+    short_weight_feature: str | None = None
+    long_weight_lag: int = 0
+    short_weight_lag: int = 0
     long_filter: RankFilterSpec | FilterStageSpec | None = None
     short_filter: RankFilterSpec | FilterStageSpec | None = None
+    target_average: TargetAverageSpec | None = None
 
     def resolved_name(self) -> str:
         prefix = self.universe_name or "universe"
         schedule_suffix = str(self.rebalance_frequency)
+        if self.target_average is not None:
+            schedule_suffix += f"_tavg{self.target_average.method}{self.target_average.periods}"
         if self.hedge is not None:
             hedge = self.hedge
             market_token = hedge.market.replace(":", "_").replace("/", "_")
@@ -412,6 +442,9 @@ class WeightSpec:
             if self.long_exposure_feature or self.short_exposure_feature:
                 direction += (self.long_exposure_feature, self.long_exposure_lag,
                               self.short_exposure_feature, self.short_exposure_lag)
+            if self.long_weight_feature or self.short_weight_feature:
+                direction += (("leg_weights", self.long_weight_feature, self.long_weight_lag,
+                               self.short_weight_feature, self.short_weight_lag),)
             token = sha256(repr(direction).encode()).hexdigest()[:16]
             return (f"{prefix}__long_short_equal_{schedule_suffix}"
                     f"_long{self.long_exposure:g}_short{self.short_exposure:g}_{token}"

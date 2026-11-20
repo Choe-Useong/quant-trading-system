@@ -602,13 +602,14 @@ def benchmark_summary(
     benchmark_label: str,
     annualization_factor: int = 252,
     benchmark_mode: str = "single_market",
+    risk_free: pd.Series | None = None,
 ) -> pd.Series:
     end_value = float(benchmark_curve.iloc[-1])
     total_return = ((end_value / init_cash) - 1.0) * 100.0
     returns = compute_return_series(benchmark_curve)
     max_drawdown_pct = compute_max_drawdown_pct(benchmark_curve)
-    sharpe_ratio = compute_sharpe_ratio(returns, annualization_factor=annualization_factor)
-    sortino_ratio = compute_sortino_ratio(returns, annualization_factor=annualization_factor)
+    sharpe_ratio = compute_sharpe_ratio(returns, annualization_factor=annualization_factor, risk_free=risk_free)
+    sortino_ratio = compute_sortino_ratio(returns, annualization_factor=annualization_factor, risk_free=risk_free)
     annualized_return = compute_annualized_return(benchmark_curve, annualization_factor=annualization_factor)
     calmar_ratio = float("nan")
     if max_drawdown_pct != 0:
@@ -625,6 +626,10 @@ def benchmark_summary(
             "Benchmark Sharpe Ratio": sharpe_ratio,
             "Benchmark Sortino Ratio": sortino_ratio,
             "Benchmark Calmar Ratio": calmar_ratio,
+            "Benchmark Annualized Volatility [%]": compute_annualized_volatility_pct(
+                returns, annualization_factor=annualization_factor),
+            "Benchmark Modified Sharpe Ratio": compute_modified_sharpe_ratio(
+                returns, annualization_factor=annualization_factor, risk_free=risk_free),
         }
     )
 
@@ -751,22 +756,119 @@ def compute_drawdown_recovery_stats(curve: pd.Series) -> pd.Series:
     )
 
 
-def compute_sharpe_ratio(returns: pd.Series, annualization_factor: int = 252) -> float:
-    std = float(returns.std(ddof=0))
+def excess_over_risk_free(returns: pd.Series, risk_free: pd.Series | None) -> pd.Series:
+    """Per-period returns minus the per-period risk-free return (unchanged when risk_free is None)."""
+    if risk_free is None:
+        return returns
+    aligned = risk_free.reindex(returns.index)
+    if aligned.isna().any():
+        missing = returns.index[aligned.isna().to_numpy()]
+        raise ValueError(f"risk-free returns do not cover {len(missing)} return periods, first {missing[0]}")
+    return returns - aligned
+
+
+def compute_sharpe_ratio(
+    returns: pd.Series,
+    annualization_factor: int = 252,
+    risk_free: pd.Series | None = None,
+) -> float:
+    excess = excess_over_risk_free(returns, risk_free)
+    std = float(excess.std(ddof=0))
     if std == 0.0:
         return float("nan")
-    return float((returns.mean() / std) * (annualization_factor ** 0.5))
+    return float((excess.mean() / std) * (annualization_factor ** 0.5))
 
 
-def compute_sortino_ratio(returns: pd.Series, annualization_factor: int = 252) -> float:
+def compute_sortino_ratio(
+    returns: pd.Series,
+    annualization_factor: int = 252,
+    risk_free: pd.Series | None = None,
+) -> float:
     clean_returns = pd.to_numeric(returns, errors="coerce").dropna()
     if clean_returns.empty:
         return float("nan")
-    downside_returns = clean_returns.clip(upper=0.0)
+    excess = excess_over_risk_free(clean_returns, risk_free)
+    downside_returns = excess.clip(upper=0.0)
     downside_deviation = float((downside_returns.pow(2).mean()) ** 0.5)
     if downside_deviation == 0.0:
         return float("nan")
-    return float((clean_returns.mean() / downside_deviation) * (annualization_factor ** 0.5))
+    return float((excess.mean() / downside_deviation) * (annualization_factor ** 0.5))
+
+
+def compute_annualized_volatility_pct(returns: pd.Series, annualization_factor: int = 252) -> float:
+    """Population standard deviation of per-period returns, annualized (same as the Sharpe denominator)."""
+    clean_returns = pd.to_numeric(returns, errors="coerce").dropna()
+    if clean_returns.empty:
+        return float("nan")
+    return float(clean_returns.std(ddof=0) * (annualization_factor ** 0.5) * 100.0)
+
+
+def compute_modified_sharpe_ratio(
+    returns: pd.Series,
+    annualization_factor: int = 252,
+    risk_free: pd.Series | None = None,
+) -> float:
+    """Israelsen modified Sharpe: ER / sigma when ER >= 0, ER * sigma when ER < 0.
+
+    ER is the annualized mean excess return and sigma the annualized standard deviation of the
+    excess returns, both as fractions, so a positive ER gives the ordinary Sharpe ratio.
+    """
+    clean_returns = pd.to_numeric(returns, errors="coerce").dropna()
+    if clean_returns.empty:
+        return float("nan")
+    excess = excess_over_risk_free(clean_returns, risk_free)
+    sigma = float(excess.std(ddof=0)) * (annualization_factor ** 0.5)
+    if sigma == 0.0:
+        return float("nan")
+    expected = float(excess.mean()) * annualization_factor
+    return expected / sigma if expected >= 0.0 else expected * sigma
+
+
+def resolve_risk_free_returns(
+    spec: object,
+    index: pd.Index,
+    periods_per_year: int,
+) -> tuple[pd.Series | None, pd.Series]:
+    """Per-bar risk-free returns from vectorbt_spec.risk_free_rate and summary rows describing them.
+
+    spec is None (0%), {"annual_pct": x} or {"file": csv, "column": name} with annual percent rates by
+    date. Each bar uses the rate known at the previous bar's timestamp (the first bar its own), and an
+    annual rate r becomes (1 + r / 100) ** (1 / periods_per_year) - 1 per bar.
+    """
+    if spec is None:
+        return None, pd.Series({"Risk-Free Rate Source": "none", "Risk-Free Rate Mean [%]": 0.0})
+    if not isinstance(spec, dict) or set(spec) not in ({"annual_pct"}, {"file", "column"}):
+        raise ValueError("risk_free_rate must be {'annual_pct': x} or {'file': path, 'column': name}")
+    bar_times = pd.DatetimeIndex(index)
+    if bar_times.tz is not None:
+        bar_times = bar_times.tz_convert(None)
+    last_date = None
+    if "annual_pct" in spec:
+        annual = pd.Series(float(spec["annual_pct"]), index=index, dtype="float64")
+        source = f"constant {float(spec['annual_pct'])}%"
+    else:
+        path = Path(str(spec["file"]))
+        path = path if path.is_absolute() else ROOT_DIR / path
+        frame = pd.read_csv(path, index_col=0, parse_dates=True, encoding="utf-8-sig")
+        column = str(spec["column"])
+        if column not in frame.columns:
+            raise ValueError(f"risk_free_rate column {column!r} is not in {path}")
+        rates = pd.to_numeric(frame[column], errors="coerce").dropna().sort_index()
+        rates.index = pd.DatetimeIndex(rates.index)
+        rates = rates[~rates.index.duplicated(keep="last")]
+        positions = rates.index.searchsorted(bar_times, side="right") - 1
+        if len(positions) and positions[0] < 0:
+            raise ValueError(f"risk_free_rate {column} starts {rates.index[0].date()}, after the first bar {bar_times[0]}")
+        known = pd.Series(rates.to_numpy()[positions], index=index, dtype="float64")
+        annual = known.shift(1)
+        annual.iloc[0] = known.iloc[0]
+        source = f"{path.name}:{column}"
+        last_date = rates.index[min(int(positions[-1]), len(rates) - 1)].date().isoformat() if len(positions) else None
+    per_bar = (1.0 + annual / 100.0) ** (1.0 / float(periods_per_year)) - 1.0
+    stats = {"Risk-Free Rate Source": source, "Risk-Free Rate Mean [%]": float(annual.mean())}
+    if last_date is not None:
+        stats["Risk-Free Rate Last Observation"] = last_date
+    return per_bar.rename("risk_free_return"), pd.Series(stats)
 
 
 def compute_cvar_sharpe_ratio(
@@ -836,9 +938,11 @@ def strategy_performance_summary(
     curve: pd.Series,
     annualization_factor: int = 252,
     initial_cash: float | None = None,
+    risk_free: pd.Series | None = None,
 ) -> pd.Series:
     """With initial_cash, CAGR and drawdown metrics start from the starting
-    balance and returns include the first bar's change, as the TPE evaluator does."""
+    balance and returns include the first bar's change, as the TPE evaluator does.
+    risk_free (per-bar returns on the curve's index) applies to Sharpe, Sortino and modified Sharpe."""
     anchored = anchor_initial_cash(curve, initial_cash)
     returns = compute_return_series(anchored)
     if anchored is not curve:
@@ -852,8 +956,14 @@ def strategy_performance_summary(
     return pd.Series(
         {
             "CAGR [%]": annualized_return * 100.0,
-            "Sharpe Ratio": compute_sharpe_ratio(returns, annualization_factor=annualization_factor),
-            "Sortino Ratio": compute_sortino_ratio(returns, annualization_factor=annualization_factor),
+            "Sharpe Ratio": compute_sharpe_ratio(
+                returns, annualization_factor=annualization_factor, risk_free=risk_free),
+            "Sortino Ratio": compute_sortino_ratio(
+                returns, annualization_factor=annualization_factor, risk_free=risk_free),
+            "Modified Sharpe Ratio": compute_modified_sharpe_ratio(
+                returns, annualization_factor=annualization_factor, risk_free=risk_free),
+            "Annualized Volatility [%]": compute_annualized_volatility_pct(
+                returns, annualization_factor=annualization_factor),
             "Calmar Ratio": calmar_ratio,
             "CVaR 5% Sharpe": compute_cvar_sharpe_ratio(
                 returns,
@@ -887,10 +997,14 @@ def compute_information_ratio(
     else:
         info_ratio = float(excess_returns.mean() / tracking_error)
         annualized_info_ratio = info_ratio * (annualization_factor ** 0.5)
+    annualized_tracking_error = (
+        tracking_error * (annualization_factor ** 0.5) * 100.0 if len(excess_returns) else float("nan")
+    )
     return pd.Series(
         {
             "Information Ratio": info_ratio,
             "Annualized Information Ratio": annualized_info_ratio,
+            "Tracking Error [%]": annualized_tracking_error,
         }
     )
 
@@ -899,7 +1013,9 @@ def compute_benchmark_regression_stats(
     strategy_returns: pd.Series,
     benchmark_returns: pd.Series,
     annualization_factor: int = 252,
+    risk_free: pd.Series | None = None,
 ) -> pd.Series:
+    """Beta and Jensen alpha from returns in excess of risk_free (CAPM); excess return over the benchmark."""
     aligned = pd.concat(
         [
             strategy_returns.rename("strategy"),
@@ -919,9 +1035,11 @@ def compute_benchmark_regression_stats(
     if len(aligned) < 2:
         return empty
 
-    strategy = aligned["strategy"]
-    benchmark = aligned["benchmark"]
-    annualized_excess_return = float((strategy.mean() - benchmark.mean()) * annualization_factor * 100.0)
+    annualized_excess_return = float(
+        (aligned["strategy"].mean() - aligned["benchmark"].mean()) * annualization_factor * 100.0
+    )
+    strategy = excess_over_risk_free(aligned["strategy"], risk_free)
+    benchmark = excess_over_risk_free(aligned["benchmark"], risk_free)
     benchmark_var = float(benchmark.var(ddof=0))
     strategy_std = float(strategy.std(ddof=0))
     benchmark_std = float(benchmark.std(ddof=0))
@@ -1092,6 +1210,84 @@ def compute_recent_2y_stats(
             "Recent 2Y AIR": recent_ir["Annualized Information Ratio"],
             "Recent 2Y Max Drawdown [%]": compute_max_drawdown_pct(recent_equity),
         }
+    )
+
+
+RECENT_PERIODS = (
+    ("3M", pd.DateOffset(months=3), False),
+    ("6M", pd.DateOffset(months=6), False),
+    ("3Y", pd.DateOffset(years=3), True),
+    ("5Y", pd.DateOffset(years=5), True),
+)
+
+
+def compute_recent_period_stats(
+    equity_curve: pd.Series,
+    benchmark_curve: pd.Series,
+    *,
+    label: str,
+    offset: pd.DateOffset,
+    include_cagr: bool,
+    annualization_factor: int = 252,
+) -> pd.Series:
+    """Cumulative return, IR, AIR and MDD over the trailing window ending at the last bar.
+
+    Unlike the Recent 1Y/2Y columns, the window must be covered: when the curve starts more than one
+    maximal bar gap after last bar - offset, every value is NaN. With include_cagr the annualized
+    returns are added.
+    """
+    names = [f"Recent {label} Return [%]", f"Recent {label} Benchmark Return [%]"]
+    if include_cagr:
+        names += [f"Recent {label} CAGR [%]", f"Recent {label} Benchmark CAGR [%]"]
+    names += [f"Recent {label} Information Ratio", f"Recent {label} AIR", f"Recent {label} Max Drawdown [%]"]
+    result = pd.Series({name: float("nan") for name in names})
+    if equity_curve.empty or benchmark_curve.empty:
+        return result
+    last_timestamp = pd.Timestamp(equity_curve.index[-1])
+    start_timestamp = last_timestamp - offset
+    aligned = pd.concat(
+        [equity_curve.rename("strategy"), benchmark_curve.rename("benchmark")], axis=1, join="inner"
+    ).dropna()
+    if len(aligned) < 2:
+        return result
+    # Covered when the first bar is no later than one maximal bar gap (weekend, holiday) after the start.
+    largest_gap = pd.Series(aligned.index).diff().max()
+    if pd.Timestamp(aligned.index[0]) - start_timestamp > largest_gap:
+        return result
+    aligned = aligned[aligned.index >= start_timestamp]
+    if len(aligned) < 2:
+        return result
+    strategy, benchmark = aligned["strategy"], aligned["benchmark"]
+    result[f"Recent {label} Return [%]"] = (float(strategy.iloc[-1] / strategy.iloc[0]) - 1.0) * 100.0
+    result[f"Recent {label} Benchmark Return [%]"] = (float(benchmark.iloc[-1] / benchmark.iloc[0]) - 1.0) * 100.0
+    if include_cagr:
+        result[f"Recent {label} CAGR [%]"] = compute_annualized_return(
+            strategy, annualization_factor=annualization_factor) * 100.0
+        result[f"Recent {label} Benchmark CAGR [%]"] = compute_annualized_return(
+            benchmark, annualization_factor=annualization_factor) * 100.0
+    ir = compute_information_ratio(
+        compute_return_series(strategy), compute_return_series(benchmark), annualization_factor=annualization_factor
+    )
+    result[f"Recent {label} Information Ratio"] = ir["Information Ratio"]
+    result[f"Recent {label} AIR"] = ir["Annualized Information Ratio"]
+    result[f"Recent {label} Max Drawdown [%]"] = compute_max_drawdown_pct(strategy)
+    return result
+
+
+def compute_recent_extra_period_stats(
+    equity_curve: pd.Series,
+    benchmark_curve: pd.Series,
+    annualization_factor: int = 252,
+) -> pd.Series:
+    """Recent 3M, 6M, 3Y and 5Y statistics (3Y and 5Y also annualized)."""
+    return pd.concat(
+        [
+            compute_recent_period_stats(
+                equity_curve, benchmark_curve, label=label, offset=offset, include_cagr=include_cagr,
+                annualization_factor=annualization_factor,
+            )
+            for label, offset, include_cagr in RECENT_PERIODS
+        ]
     )
 
 

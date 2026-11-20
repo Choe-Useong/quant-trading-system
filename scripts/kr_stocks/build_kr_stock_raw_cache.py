@@ -8,10 +8,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.storage import replace_file  # noqa: E402
+
 DEFAULT_OUT_DIR = ROOT / "data" / "kr_stocks" / "raw"
 DEFAULT_INDEX_SYMBOLS = "KOSPI=^KS11,KOSDAQ=^KQ11"
 INDUSTRY_FREQUENCIES = {"monthly", "weekly", "daily"}
@@ -47,6 +53,55 @@ INDUSTRY_COLUMNS = [
     "Market",
     "Industry",
 ]
+
+KRX_PRICE_FILE = "krx_price_daily.parquet"
+KRX_ADJUSTED_CLOSE_FILE = "close_krx_adj.parquet"
+KRX_ADJUST_EVENTS_FILE = "krx_adjust_events.json"
+KRX_PRICE_COLUMNS = [
+    "Date",
+    "Code",
+    "Market",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Change",
+    "FlucType",
+    "Volume",
+    "Amount",
+    "Marcap",
+    "Stocks",
+]
+# KRX all-market daily quote fields (MDCSTAT01501).
+KRX_FIELD_MAP = {
+    "TDD_OPNPRC": "Open",
+    "TDD_HGPRC": "High",
+    "TDD_LWPRC": "Low",
+    "TDD_CLSPRC": "Close",
+    "CMPPREVDD_PRC": "Change",
+    "ACC_TRDVOL": "Volume",
+    "ACC_TRDVAL": "Amount",
+    "MKTCAP": "Marcap",
+    "LIST_SHRS": "Stocks",
+}
+# FLUC_TP_CD: 1 up, 2 down, 3 unchanged. Other codes are not sign-checked.
+KRX_FLUC_SIGN = {"1": 1, "2": -1, "3": 0}
+KRX_DAY_COUNT_MIN_RATIO = 0.9
+# A consolidation finished during a halt and reopening in delisting liquidation trading (no price
+# limit) can come with the base price left at the pre-consolidation close (DATA-018: 052670
+# 2026-02-09, 070480 2014-07-08). Only then the listed-share ratio becomes the factor.
+KRX_DAILY_PRICE_LIMIT = 0.30
+KRX_OVERRIDE_MIN_SHARE_RATIO = 1.5
+KRX_LABEL_COLUMNS = ("Code", "Market", "FlucType")
+KRX_ADJUSTMENT_RULE = (
+    "factor_t = (Close_t - Change_t) / Close_prev, i.e. KRX base price over the previous close; "
+    "adjusted_t = Close_t * product of factors after t, so the last date equals the raw close. "
+    "factor is 1 when the code has no row on the previous trading date (listing or reappearance). "
+    "Reopening after a halt uses the KRX auction base price, so that day's gap is not a return. "
+    "Cash dividends are not adjusted. Exception: when the base equals the previous close, the previous "
+    "day was halted, listed shares fell at least 1.5x and the close moved beyond the 30% daily limit, "
+    "the factor is the previous / current listed-share ratio (share_ratio_override)."
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,6 +182,31 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Sleep between KRX industry snapshot requests.",
+    )
+    parser.add_argument(
+        "--include-krx-price",
+        action="store_true",
+        help=(
+            f"Update {KRX_PRICE_FILE} from KRX all-market daily quotes and rebuild "
+            f"{KRX_ADJUSTED_CLOSE_FILE} (regular-session close adjusted by KRX base prices)."
+        ),
+    )
+    parser.add_argument(
+        "--krx-price-overlap-days",
+        type=int,
+        default=10,
+        help="Calendar-day overlap to re-fetch for KRX daily quote updates.",
+    )
+    parser.add_argument(
+        "--krx-price-sleep-seconds",
+        type=float,
+        default=0.3,
+        help="Sleep between KRX daily quote requests.",
+    )
+    parser.add_argument(
+        "--krx-final-time",
+        default="20:30",
+        help="KST time after which today's KRX quotes are stored. Earlier runs stop at the previous day.",
     )
     return parser.parse_args()
 
@@ -233,6 +313,7 @@ def write_report(
     start: pd.Timestamp,
     end: pd.Timestamp,
     markets: list[str],
+    krx_price: dict | None = None,
 ) -> dict:
     marcap_codes = set()
     close_codes = set()
@@ -262,7 +343,11 @@ def write_report(
                 else None
             ),
             "download_report": str(out_dir / "download_report.json"),
+            "krx_price": str(out_dir / KRX_PRICE_FILE) if krx_price is not None else None,
+            "krx_adjusted_close": str(out_dir / KRX_ADJUSTED_CLOSE_FILE) if krx_price is not None else None,
+            "krx_adjust_events": str(out_dir / KRX_ADJUST_EVENTS_FILE) if krx_price is not None else None,
         },
+        "krx_price": krx_price,
         "marcap": frame_summary(marcap, "Date") if marcap is not None else None,
         "close_fdr": frame_summary(close) if close is not None else None,
         "index_price": frame_summary(index_price) if index_price is not None else None,
@@ -919,13 +1004,488 @@ def merge_index_price(existing: pd.DataFrame, fetched: pd.DataFrame) -> pd.DataF
     return out.loc[:, sorted(out.columns)].apply(pd.to_numeric, errors="coerce")
 
 
-def validate_cache_alignment(marcap: pd.DataFrame | None, close: pd.DataFrame | None) -> list[str]:
+def _krx_number(values: pd.Series) -> pd.Series:
+    text = values.astype(str).str.replace(",", "", regex=False).str.strip()
+    return pd.to_numeric(text.where(~text.isin(["", "-"])), errors="coerce").astype("float64")
+
+
+def parse_krx_price_frame(raw: pd.DataFrame | None, date: pd.Timestamp, markets: list[str]) -> pd.DataFrame:
+    """Convert one KRX all-market daily quote response into KRX_PRICE_COLUMNS rows."""
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=KRX_PRICE_COLUMNS)
+    missing = [column for column in ("ISU_SRT_CD", "MKT_NM", "FLUC_TP_CD", *KRX_FIELD_MAP) if column not in raw.columns]
+    if missing:
+        raise ValueError(f"KRX daily quotes for {date.date()} miss columns {missing}")
+    market = raw["MKT_NM"].astype(str).str.strip().str.upper()
+    frame = raw[market.isin(markets)]
+    out = pd.DataFrame(
+        {
+            "Date": pd.Timestamp(date).normalize(),
+            "Code": frame["ISU_SRT_CD"].astype(str).str.strip().str.upper().str.zfill(6).to_numpy(),
+            "Market": market[frame.index].to_numpy(),
+        },
+        index=range(len(frame)),
+    )
+    for field, name in KRX_FIELD_MAP.items():
+        out[name] = _krx_number(frame[field]).to_numpy()
+    out["FlucType"] = frame["FLUC_TP_CD"].astype(str).str.strip().to_numpy()
+    return out[KRX_PRICE_COLUMNS]
+
+
+def _label_values(series: pd.Series) -> set:
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        return set(series.cat.categories)
+    return set(series.dropna().unique())
+
+
+def concat_krx_price(frames: list[pd.DataFrame | None]) -> pd.DataFrame:
+    """Concatenate KRX quote frames keeping the label columns categorical (about 4x less memory)."""
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=KRX_PRICE_COLUMNS)
+    for column in KRX_LABEL_COLUMNS:
+        dtype = pd.CategoricalDtype(sorted(set().union(*(_label_values(frame[column]) for frame in frames))))
+        frames = [frame.assign(**{column: frame[column].astype(dtype)}) for frame in frames]
+    return pd.concat(frames, ignore_index=True)[KRX_PRICE_COLUMNS]
+
+
+def check_krx_price_rows(frame: pd.DataFrame) -> list[str]:
+    """Row-level integrity: unique (Date, Code) and Change sign agreeing with FLUC_TP_CD."""
+    errors = []
+    duplicated = frame.duplicated(["Date", "Code"], keep=False)
+    if duplicated.any():
+        errors.append(
+            f"KRX quotes repeat {int(duplicated.sum())} (Date, Code) rows, e.g. "
+            f"{frame.loc[duplicated, ['Date', 'Code']].head(5).astype(str).to_dict('records')}"
+        )
+    expected = frame["FlucType"].astype(object).map(KRX_FLUC_SIGN).astype("float64")
+    known = expected.notna() & frame["Change"].notna()
+    bad = known & (np.sign(frame["Change"]) != expected)
+    if bad.any():
+        errors.append(
+            f"KRX Change sign disagrees with FLUC_TP_CD on {int(bad.sum())} rows, e.g. "
+            f"{frame.loc[bad, ['Date', 'Code', 'Change', 'FlucType']].head(5).astype(str).to_dict('records')}"
+        )
+    return errors
+
+
+def _load_krx_daily_quote_fetcher():
+    _load_env()
+    # pykrx prints the KRX login banner (including the ID) on import and on requests.
+    with contextlib.redirect_stdout(io.StringIO()):
+        core = importlib.import_module("pykrx.website.krx.market.core")
+    quotes = core.전종목시세
+
+    def fetch(date_key: str) -> pd.DataFrame:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return quotes().fetch(date_key, "ALL")
+
+    return fetch
+
+
+def fetch_krx_price(
+    *,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    dates=None,
+    markets: list[str],
+    sleep_seconds: float,
+    fetch_day=None,
+    retries: int = 3,
+) -> pd.DataFrame:
+    """Fetch KRX all-market daily quotes for each business day (or the given dates).
+
+    Holidays return no active rows and are skipped; request errors are retried, then raised.
+    """
+    fetch_day = fetch_day or _load_krx_daily_quote_fetcher()
+    dates = _date_range_for_update(start, end) if dates is None else pd.DatetimeIndex(dates)
+    parts = []
+    for number, date in enumerate(dates, start=1):
+        for attempt in range(retries):
+            try:
+                raw = fetch_day(date.strftime("%Y%m%d"))
+                break
+            except Exception as exc:
+                if attempt == retries - 1:
+                    raise RuntimeError(f"KRX daily quote fetch failed for {date.date()}: {exc}") from exc
+                time.sleep(2 * (attempt + 1))
+        frame = parse_krx_price_frame(raw, date, markets)
+        if not frame.empty and frame["Volume"].fillna(0).sum() > 0:
+            parts.append(frame)
+        if number % 100 == 0 or number == len(dates):
+            print(f"krx price progress: {number}/{len(dates)} dates (through {date.date()})", flush=True)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+    return concat_krx_price(parts)
+
+
+def krx_quote_end(end: pd.Timestamp, *, now_kst: pd.Timestamp, final_time: str) -> pd.Timestamp:
+    """Last date whose KRX quotes may be stored: today only after final_time (KST)."""
+    hour, minute = (int(part) for part in str(final_time).split(":"))
+    today = pd.Timestamp(now_kst.year, now_kst.month, now_kst.day)
+    end = min(pd.Timestamp(end).normalize(), today)
+    if end == today and (now_kst.hour, now_kst.minute) < (hour, minute):
+        return today - pd.Timedelta(days=1)
+    return end
+
+
+def merge_krx_price(existing: pd.DataFrame | None, fetched: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    """Replace whole fetched dates; report rows whose stored Close/Change changed on refetch."""
+    if existing is None or existing.empty:
+        merged = concat_krx_price([fetched])
+        changed: list[dict] = []
+    else:
+        fetched_dates = set(fetched["Date"])
+        old = existing[existing["Date"].isin(fetched_dates)][["Date", "Code", "Close", "Change"]]
+        new = fetched[["Date", "Code", "Close", "Change"]]
+        both = old.astype({"Code": object}).merge(new.astype({"Code": object}), on=["Date", "Code"],
+                                                  suffixes=("_old", ""))
+        moved = both[
+            ~np.isclose(both["Close_old"], both["Close"], equal_nan=True)
+            | ~np.isclose(both["Change_old"], both["Change"], equal_nan=True)
+        ]
+        changed = [
+            {
+                "date": row.Date.date().isoformat(),
+                "code": row.Code,
+                "close_old": row.Close_old,
+                "close_new": row.Close,
+                "change_old": row.Change_old,
+                "change_new": row.Change,
+            }
+            for row in moved.itertuples(index=False)
+        ]
+        merged = concat_krx_price([existing[~existing["Date"].isin(fetched_dates)], fetched])
+    merged = merged.sort_values(["Date", "Code"]).reset_index(drop=True)
+    return merged, changed
+
+
+def check_krx_day_counts(prices: pd.DataFrame, dates) -> list[str]:
+    counts = prices.groupby("Date").size().sort_index()
+    errors = []
+    for date in sorted(set(dates)):
+        position = counts.index.get_loc(date)
+        if position == 0:
+            continue
+        previous = counts.iloc[position - 1]
+        if counts.iloc[position] < KRX_DAY_COUNT_MIN_RATIO * previous:
+            errors.append(
+                f"KRX quotes on {pd.Timestamp(date).date()} have {int(counts.iloc[position])} codes, "
+                f"previous trading date had {int(previous)}"
+            )
+    return errors
+
+
+def _marcap_slice(marcap: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    dates = pd.to_datetime(marcap["Date"]).dt.normalize()
+    raw = marcap.loc[(dates >= start) & (dates <= end), ["Date", "Code", "Close_raw"]].copy()
+    raw["Date"] = pd.to_datetime(raw["Date"]).dt.normalize()
+    raw["Code"] = raw["Code"].astype(str).str.zfill(6)
+    return raw.drop_duplicates(["Date", "Code"], keep="last")
+
+
+def compare_krx_close_with_marcap(
+    prices: pd.DataFrame,
+    marcap: pd.DataFrame,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict:
+    """KRX Close must equal marcap Close_raw; marcap trading dates must exist in KRX quotes."""
+    krx = prices[(prices["Date"] >= start) & (prices["Date"] <= end)][["Date", "Code", "Close"]]
+    krx = krx.astype({"Code": object})
+    raw = _marcap_slice(marcap, start, end)
+    both = krx.merge(raw, on=["Date", "Code"], how="inner")
+    mismatch = both[(both["Close"] - both["Close_raw"]).abs() > 0.5]
+    missing_dates = sorted(set(raw["Date"]) - set(krx["Date"]))
+    return {
+        "compared_rows": int(len(both)),
+        "mismatched_rows": int(len(mismatch)),
+        "mismatched_dates": int(mismatch["Date"].nunique()),
+        "mismatch_examples": mismatch.head(20).assign(Date=lambda f: f["Date"].dt.date.astype(str)).to_dict("records"),
+        "marcap_dates_missing_in_krx": [date.date().isoformat() for date in missing_dates],
+    }
+
+
+def _merge_marcap_checks(checks: list[dict]) -> dict | None:
+    if not checks:
+        return None
+    return {
+        "compared_rows": sum(check["compared_rows"] for check in checks),
+        "mismatched_rows": sum(check["mismatched_rows"] for check in checks),
+        "mismatched_dates": sum(check["mismatched_dates"] for check in checks),
+        "mismatch_examples": [example for check in checks for example in check["mismatch_examples"]][:20],
+        "marcap_dates_missing_in_krx": [date for check in checks for date in check["marcap_dates_missing_in_krx"]],
+    }
+
+
+def compute_krx_adjusted_close(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Adjusted close and adjustment events from KRX close and change (see KRX_ADJUSTMENT_RULE)."""
+    frame = prices.drop_duplicates(["Date", "Code"], keep="last")
+    if isinstance(frame["Code"].dtype, pd.CategoricalDtype):
+        frame = frame.assign(Code=frame["Code"].cat.remove_unused_categories())
+
+    def wide(column: str) -> pd.DataFrame:
+        table = frame.pivot(index="Date", columns="Code", values=column)
+        table.columns = pd.Index([str(code) for code in table.columns], name="Code")
+        return table.sort_index()
+
+    close = wide("Close")
+    close = close.reindex(columns=sorted(close.columns))
+    change = wide("Change").reindex(index=close.index, columns=close.columns)
+    volume = wide("Volume").reindex(index=close.index, columns=close.columns)
+    stocks = wide("Stocks").reindex(index=close.index, columns=close.columns)
+    present = close.notna()
+    previous = close.shift(1)
+    base = close - change
+    linked = present & previous.gt(0)
+    invalid = linked & ~base.gt(0)
+    factor = (base / previous).where(linked & base.gt(0), 1.0)
+    share_ratio = stocks.shift(1) / stocks
+    override = (
+        linked
+        & factor.eq(1.0)
+        & volume.shift(1).eq(0)
+        & share_ratio.ge(KRX_OVERRIDE_MIN_SHARE_RATIO)
+        & (close / previous - 1.0).abs().gt(KRX_DAILY_PRICE_LIMIT)
+    )
+    factor = factor.mask(override, share_ratio)
+    after = factor.iloc[::-1].cumprod().iloc[::-1].shift(-1).fillna(1.0)
+    adjusted = (close * after).where(present)
+    adjusted.index.name = "Date"
+
+    seen_before = present.cumsum().shift(1).fillna(0).gt(0)
+    reappear = present & previous.isna() & seen_before
+    mask = (factor.ne(1.0) | reappear | invalid).to_numpy()
+    rows, cols = np.nonzero(mask)
+
+    def pick(values: pd.DataFrame) -> np.ndarray:
+        return values.to_numpy()[rows, cols]
+
+    kind = np.select(
+        [pick(invalid), pick(reappear), pick(override)],
+        ["invalid_base", "reappear", "share_ratio_override"],
+        default="adjustment",
+    )
+    events = pd.DataFrame(
+        {
+            "Date": close.index[rows],
+            "Code": close.columns[cols],
+            "kind": kind,
+            "factor": pick(factor),
+            "previous_close": pick(previous),
+            "base_price": pick(base),
+            "close": pick(close),
+            "previous_volume": pick(volume.shift(1)),
+            "share_ratio": pick(share_ratio),
+        }
+    )
+    events["halted_before"] = events["previous_volume"].eq(0)
+    share_changed = events["share_ratio"].notna() & (events["share_ratio"] - 1).abs().gt(1e-9)
+    events["share_ratio_mismatch"] = (
+        events["kind"].eq("adjustment")
+        & share_changed
+        & (events["factor"] / events["share_ratio"] - 1).abs().gt(0.05)
+    )
+    return adjusted, events.sort_values(["Date", "Code"]).reset_index(drop=True)
+
+
+def _write_parquet_atomic(frame: pd.DataFrame, path: Path, *, index: bool) -> None:
+    temp_path = path.with_name(f"{path.name}.tmp")
+    frame.to_parquet(temp_path, index=index)
+    replace_file(temp_path, path)  # retries transient Windows access denials (DATA-008)
+
+
+def build_krx_price_history(
+    *,
+    out_dir: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    markets: list[str],
+    sleep_seconds: float,
+    marcap: pd.DataFrame | None,
+    fetch_day=None,
+) -> tuple[pd.DataFrame, dict | None]:
+    """Full-history fetch in calendar-year chunks with a resumable checkpoint.
+
+    Each checked year is appended to ``<KRX_PRICE_FILE>.partial``; a rerun with the same start and
+    markets resumes after the last stored date. A marcap trading date missing from KRX is fetched
+    once more and is an error if still missing; Close_raw mismatches are only reported.
+    """
+    partial_path = out_dir / f"{KRX_PRICE_FILE}.partial"
+    meta_path = out_dir / f"{KRX_PRICE_FILE}.partial.json"
+    meta = {"start": start.date().isoformat(), "markets": markets}
+    done = None
+    resume_start = start
+    if partial_path.exists():
+        stored = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
+        if stored != meta:
+            raise ValueError(
+                f"{partial_path} was built with {stored}, not {meta}. Delete it to start the history fetch over."
+            )
+        done = pd.read_parquet(partial_path)
+        resume_start = done["Date"].max() + pd.Timedelta(days=1)
+        print(f"krx price resume: {len(done)} rows through {done['Date'].max().date()}", flush=True)
+    checks = []
+    for year in range(resume_start.year, end.year + 1):
+        chunk_start = max(resume_start, pd.Timestamp(year, 1, 1))
+        chunk_end = min(end, pd.Timestamp(year, 12, 31))
+        if chunk_start > chunk_end:
+            continue
+        fetched = fetch_krx_price(
+            start=chunk_start, end=chunk_end, markets=markets, sleep_seconds=sleep_seconds, fetch_day=fetch_day
+        )
+        if marcap is not None:
+            expected = set(_marcap_slice(marcap, chunk_start, chunk_end)["Date"])
+            missing = sorted(expected - set(fetched["Date"]))
+            if missing:
+                print(f"krx price refetch {len(missing)} missing dates: {[d.date().isoformat() for d in missing[:10]]}",
+                      flush=True)
+                fetched = concat_krx_price([fetched, fetch_krx_price(
+                    dates=missing, markets=markets, sleep_seconds=sleep_seconds, fetch_day=fetch_day)])
+                fetched = fetched.sort_values(["Date", "Code"]).reset_index(drop=True)
+        errors = check_krx_price_rows(fetched)
+        previous_day = None if done is None else done[done["Date"] == done["Date"].max()]
+        errors += check_krx_day_counts(concat_krx_price([previous_day, fetched]), fetched["Date"].unique())
+        if marcap is not None and not fetched.empty:
+            check = compare_krx_close_with_marcap(fetched, marcap, start=chunk_start, end=chunk_end)
+            if check["marcap_dates_missing_in_krx"]:
+                errors.append(f"marcap trading dates missing in KRX quotes: {check['marcap_dates_missing_in_krx'][:10]}")
+            checks.append(check)
+        if errors:
+            raise ValueError(f"KRX price history rejected in {year} (earlier years kept in {partial_path}): "
+                             + "; ".join(errors))
+        done = concat_krx_price([done, fetched])
+        _write_parquet_atomic(done, partial_path, index=False)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        print(f"krx price checkpoint: {year} done, {len(done)} rows", flush=True)
+    if done is None or done.empty:
+        raise ValueError("KRX price history produced no rows")
+    return done.sort_values(["Date", "Code"]).reset_index(drop=True), _merge_marcap_checks(checks)
+
+
+def update_krx_price_cache(
+    *,
+    out_dir: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    markets: list[str],
+    incremental: bool,
+    overlap_days: int,
+    sleep_seconds: float,
+    final_time: str,
+    marcap: pd.DataFrame | None,
+    now_kst: pd.Timestamp | None = None,
+    fetch_day=None,
+) -> dict:
+    """Fetch KRX daily quotes, check them, and rebuild the adjusted close from the full stored history.
+
+    With an existing price file and ``incremental`` the overlap window is refetched and any failed
+    check (including a marcap Close_raw mismatch or a missing marcap trading date) writes nothing.
+    Otherwise the full history is fetched by build_krx_price_history.
+    """
+    price_path = out_dir / KRX_PRICE_FILE
+    now_kst = now_kst if now_kst is not None else pd.Timestamp.now(tz="Asia/Seoul")
+    fetch_end = krx_quote_end(end, now_kst=now_kst, final_time=final_time)
+    warnings = []
+    changed: list[dict] = []
+    incremental = incremental and price_path.exists()
+    if incremental:
+        existing = pd.read_parquet(price_path)
+        existing["Date"] = pd.to_datetime(existing["Date"]).dt.normalize()
+        fetch_start = _previous_fetch_start(existing["Date"].max(), overlap_days)
+        fetched = fetch_krx_price(
+            start=fetch_start, end=fetch_end, markets=markets, sleep_seconds=sleep_seconds, fetch_day=fetch_day
+        )
+        errors = check_krx_price_rows(fetched)
+        prices, changed = merge_krx_price(existing, fetched)
+        del existing
+        errors += check_krx_day_counts(prices, fetched["Date"].unique())
+        marcap_check = None
+        if marcap is not None and not fetched.empty:
+            marcap_check = compare_krx_close_with_marcap(fetched, marcap, start=fetch_start, end=fetch_end)
+            if marcap_check["mismatched_rows"]:
+                errors.append(f"KRX Close differs from marcap Close_raw on {marcap_check['mismatched_rows']} rows")
+            if marcap_check["marcap_dates_missing_in_krx"]:
+                errors.append(
+                    f"marcap trading dates missing in KRX quotes: {marcap_check['marcap_dates_missing_in_krx'][:10]}"
+                )
+        if errors:
+            raise ValueError("KRX price update rejected: " + "; ".join(errors))
+        fetched_dates = int(fetched["Date"].nunique()) if not fetched.empty else 0
+    else:
+        fetch_start = start
+        prices, marcap_check = build_krx_price_history(
+            out_dir=out_dir, start=start, end=fetch_end, markets=markets, sleep_seconds=sleep_seconds,
+            marcap=marcap, fetch_day=fetch_day)
+        if marcap_check and marcap_check["mismatched_rows"]:
+            warnings.append(f"KRX Close differs from marcap Close_raw on {marcap_check['mismatched_rows']} rows "
+                            f"({marcap_check['mismatched_dates']} dates)")
+        fetched_dates = int(prices["Date"].nunique())
+    if prices.empty:
+        raise ValueError("KRX price update produced no rows")
+
+    adjusted, events = compute_krx_adjusted_close(prices)
+    _write_parquet_atomic(prices, price_path, index=False)
+    _write_parquet_atomic(adjusted, out_dir / KRX_ADJUSTED_CLOSE_FILE, index=True)
+    event_counts = events["kind"].value_counts().to_dict()
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "rule": KRX_ADJUSTMENT_RULE,
+        "counts": {
+            **{str(key): int(value) for key, value in event_counts.items()},
+            "halted_before_adjustment": int((events["kind"].eq("adjustment") & events["halted_before"]).sum()),
+            "share_ratio_mismatch": int(events["share_ratio_mismatch"].sum()),
+        },
+        "events": events.assign(Date=events["Date"].dt.date.astype(str)).to_dict("records"),
+    }
+    (out_dir / KRX_ADJUST_EVENTS_FILE).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=1, default=float),
+        encoding="utf-8",
+    )
+    if not incremental:
+        for path in (out_dir / f"{KRX_PRICE_FILE}.partial", out_dir / f"{KRX_PRICE_FILE}.partial.json"):
+            path.unlink(missing_ok=True)
+    for warning in warnings:
+        print(f"warn: {warning}", file=sys.stderr)
+    summary = {
+        **frame_summary(prices, "Date"),
+        "codes": int(prices["Code"].nunique()),
+        "mode": "incremental" if incremental else "full_history",
+        "fetch_start": fetch_start.date().isoformat(),
+        "fetch_end": fetch_end.date().isoformat(),
+        "fetched_dates": fetched_dates,
+        "refetch_changed_rows": len(changed),
+        "refetch_changed_examples": changed[:20],
+        "marcap_check": marcap_check,
+        "warnings": warnings,
+        "adjusted_close": frame_summary(adjusted),
+        "events": payload["counts"],
+        "rule": KRX_ADJUSTMENT_RULE,
+    }
+    print("updated:", price_path, "rows:", len(prices), "range:", summary["start"], "->", summary["end"], flush=True)
+    print("events:", payload["counts"], flush=True)
+    return summary
+
+
+def _read_marcap_for_checks(path: Path) -> pd.DataFrame:
+    """Columns the report, alignment check and KRX comparison use; Code as a dictionary (low memory)."""
+    import pyarrow.parquet as pq
+
+    return pq.read_table(path, columns=["Date", "Code", "Close_raw"], read_dictionary=["Code"]).to_pandas()
+
+
+def validate_cache_alignment(
+    marcap: pd.DataFrame | None,
+    close: pd.DataFrame | None,
+    close_label: str = "close_fdr",
+) -> list[str]:
     errors = []
     if marcap is not None and close is not None and not marcap.empty and not close.empty:
         marcap_end = pd.to_datetime(marcap["Date"]).max().normalize()
         close_end = pd.to_datetime(close.index).max().normalize()
         if marcap_end != close_end:
-            errors.append(f"marcap end date {marcap_end.date()} != close_fdr end date {close_end.date()}")
+            errors.append(f"marcap end date {marcap_end.date()} != {close_label} end date {close_end.date()}")
     return errors
 
 
@@ -1078,6 +1638,30 @@ def update_raw_caches(
     return marcap, close
 
 
+def _run_krx_price_update(
+    args: argparse.Namespace,
+    *,
+    out_dir: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    markets: list[str],
+    marcap: pd.DataFrame | None,
+) -> dict | None:
+    if not args.include_krx_price:
+        return None
+    return update_krx_price_cache(
+        out_dir=out_dir,
+        start=start,
+        end=end,
+        markets=markets,
+        incremental=bool(args.update),
+        overlap_days=args.krx_price_overlap_days,
+        sleep_seconds=args.krx_price_sleep_seconds,
+        final_time=args.krx_final_time,
+        marcap=marcap,
+    )
+
+
 def main() -> int:
     args = parse_args()
     start = pd.Timestamp(args.start).normalize()
@@ -1088,6 +1672,11 @@ def main() -> int:
 
     if args.end:
         end = pd.Timestamp(args.end).normalize()
+    elif args.update and args.include_krx_price:
+        # Same stored-day rule for every source: today only after --krx-final-time (KST).
+        end = krx_quote_end(
+            pd.Timestamp.today(), now_kst=pd.Timestamp.now(tz="Asia/Seoul"), final_time=args.krx_final_time
+        )
     elif args.update:
         end = pd.Timestamp.today().normalize()
     else:
@@ -1121,7 +1710,8 @@ def main() -> int:
                 sleep_seconds=args.industry_sleep_seconds,
             )
         if marcap is None and (out_dir / "marcap_daily.parquet").exists():
-            marcap = pd.read_parquet(out_dir / "marcap_daily.parquet")
+            marcap_path = out_dir / "marcap_daily.parquet"
+            marcap = _read_marcap_for_checks(marcap_path) if args.include_krx_price else pd.read_parquet(marcap_path)
         if close is None and (out_dir / "close_fdr.parquet").exists():
             close = pd.read_parquet(out_dir / "close_fdr.parquet")
         if index_price is None and (out_dir / "index_price.parquet").exists():
@@ -1129,6 +1719,7 @@ def main() -> int:
         industry_path = out_dir / _industry_file(args.industry_frequency)
         if industry is None and industry_path.exists():
             industry = pd.read_parquet(industry_path)
+        krx_price = _run_krx_price_update(args, out_dir=out_dir, start=start, end=end, markets=markets, marcap=marcap)
         report = write_report(
             out_dir,
             args,
@@ -1139,8 +1730,15 @@ def main() -> int:
             start,
             end,
             markets,
+            krx_price=krx_price,
         )
-        alignment_errors = validate_cache_alignment(marcap, close)
+        if args.include_krx_price and args.skip_close:
+            # close_fdr is no longer refreshed; the KRX adjusted close is the price that must line up.
+            alignment_errors = validate_cache_alignment(
+                marcap, pd.read_parquet(out_dir / KRX_ADJUSTED_CLOSE_FILE).iloc[:, :1], KRX_ADJUSTED_CLOSE_FILE
+            )
+        else:
+            alignment_errors = validate_cache_alignment(marcap, close)
         if alignment_errors:
             report["validation_errors"] = alignment_errors
             (out_dir / "download_report.json").write_text(
@@ -1203,6 +1801,9 @@ def main() -> int:
             sleep_seconds=args.industry_sleep_seconds,
         )
 
+    if marcap is None and (out_dir / "marcap_daily.parquet").exists() and args.include_krx_price:
+        marcap = _read_marcap_for_checks(out_dir / "marcap_daily.parquet")
+    krx_price = _run_krx_price_update(args, out_dir=out_dir, start=start, end=end, markets=markets, marcap=marcap)
     report = write_report(
         out_dir,
         args,
@@ -1213,6 +1814,7 @@ def main() -> int:
         start,
         end,
         markets,
+        krx_price=krx_price,
     )
     print("saved:", out_dir / "download_report.json")
     print("coverage:", report["code_coverage"])

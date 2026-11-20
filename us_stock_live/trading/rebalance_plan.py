@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-json", default="", help="Optional state JSON path. Defaults to us_stock_live/.cache by profile.")
     parser.add_argument("--save-plan", default="", help="Optional path to save the generated plan JSON and register it in state.")
     parser.add_argument("--sleep-seconds", type=float, default=1.1, help="Delay between KIS quote/orderable calls.")
+    parser.add_argument(
+        "--buy-limit-buffer-pct",
+        type=float,
+        default=0.0,
+        help="Buy limit buffer used at execution. Buy quantities are sized so qty x buffered limit fits in cash.",
+    )
     parser.add_argument("--output-json", default="", help="Optional output JSON path.")
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format.")
     return parser
@@ -89,6 +95,19 @@ def _to_int_floor(value: float) -> int:
     if value <= 0 or not math.isfinite(value):
         return 0
     return int(math.floor(value + 1e-9))
+
+
+def _buy_cash_capacity(rows: list[dict[str, Any]], cash_usd: float, buy_limit_buffer_pct: float) -> float:
+    """Cash usable at last price so that buys still fit when submitted at the buffered limit.
+
+    The broker reserves qty x limit price. execute_plan.py sets limit = price x (1 + buffer)
+    rounded to cents, which can add up to $0.005 per share.
+    """
+    buffer_factor = 1.0 + max(buy_limit_buffer_pct, 0.0) / 100.0
+    rounding_slack = 0.005 * sum(
+        int(row["raw_order_qty"]) for row in rows if row["raw_action"] == "buy" and int(row["raw_order_qty"]) > 0
+    )
+    return max(float(cash_usd) - rounding_slack, 0.0) / buffer_factor
 
 
 def _reduce_buy_orders_to_cash(rows: list[dict[str, Any]], cash_usd: float) -> tuple[bool, float]:
@@ -222,6 +241,7 @@ def build_rebalance_plan(
     state_json: Path | None = None,
     save_plan: Path | None = None,
     sleep_seconds: float = 1.1,
+    buy_limit_buffer_pct: float = 0.0,
 ) -> dict[str, Any]:
     profile = _read_json(profile_json)
     kis_profile, symbol_settings = _profile_kis(profile)
@@ -385,7 +405,8 @@ def build_rebalance_plan(
 
     _apply_phase(rows, phase)
     if phase in {"full", "buy"}:
-        cash_limited, raw_buy_notional_usd = _reduce_buy_orders_to_cash(rows, float(cash_usd))
+        buy_cash_capacity_usd = _buy_cash_capacity(rows, float(cash_usd), buy_limit_buffer_pct)
+        cash_limited, raw_buy_notional_usd = _reduce_buy_orders_to_cash(rows, buy_cash_capacity_usd)
     else:
         raw_buy_notional_usd = sum(
             float(row["raw_order_notional_usd"]) for row in rows if row["raw_action"] == "buy"
@@ -479,6 +500,7 @@ def main() -> int:
         state_json=_resolve_path(args.state_json) if args.state_json else None,
         save_plan=_resolve_path(args.save_plan) if args.save_plan else None,
         sleep_seconds=args.sleep_seconds,
+        buy_limit_buffer_pct=args.buy_limit_buffer_pct,
     )
     if args.output_json:
         output_path = Path(args.output_json)

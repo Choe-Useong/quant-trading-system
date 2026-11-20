@@ -32,6 +32,7 @@ from lib.backtest_engine_v2 import run_backtest_v2, apply_observed_universe_poli
 from lib.backtest_engine_v2 import BacktestResultV2, record_execution_availability_summary_v2
 from lib.weights_v2 import build_weight_frame_v2, is_change_only_weight_output, to_change_only_target_frame
 from scripts.run_cross_section_grid_v2 import (
+    _cached_price_frame,
     _grid_combinations,
     _passes_constraints,
     _canonical_payload_key,
@@ -65,8 +66,11 @@ from scripts.run_vectorbt import (
     compute_information_ratio,
     compute_martin_ratio,
     compute_max_drawdown_pct,
+    compute_modified_sharpe_ratio,
+    compute_annualized_volatility_pct,
     compute_recent_1y_stats,
     compute_recent_2y_stats,
+    compute_recent_extra_period_stats,
     compute_return_series,
     compute_sharpe_ratio,
     compute_sortino_ratio,
@@ -75,6 +79,7 @@ from scripts.run_vectorbt import (
     load_price_frame,
     periods_per_day_for_timeframe,
     resolve_periods_per_year,
+    resolve_risk_free_returns,
     strategy_performance_summary,
     timeframe_to_pandas_freq,
     trim_frames_to_first_weight,
@@ -486,25 +491,10 @@ def _run_v2_backtest_window(
     for market in (vectorbt_payload.get("benchmark_fixed_weights") or {}).keys():
         required_price_market_set.add(str(market).upper())
     required_price_markets = sorted(required_price_market_set) if required_price_market_set else None
-    price_cache_key = (
-        str(candle_dir),
-        str(source_cache_dir),
-        price_column,
-        tuple(required_price_markets) if required_price_markets is not None else (),
-        max_markets,
-    )
-    price_frame = price_frame_cache.get(price_cache_key)
-    if price_frame is None:
-        price_frame = load_price_frame(
-            candle_dir,
-            price_column,
-            load_mode="wide",
-            source_cache_dir=source_cache_dir,
-            market_columns=required_price_markets,
-        )
-        if required_price_markets is None and max_markets is not None:
-            price_frame = price_frame.reindex(columns=sorted(price_frame.columns)[:max_markets])
-        price_frame_cache[price_cache_key] = price_frame
+    # Windows request different active markets; slices of one cached superset
+    # keep one full-history frame instead of one per window.
+    price_frame = _cached_price_frame(
+        price_frame_cache, candle_dir, source_cache_dir, price_column, required_price_markets, max_markets)
     benchmark_price_frame = None
     if benchmark_mode == "single_market" and not benchmark_uses_strategy_price_frame:
         benchmark_price_markets = [benchmark_market]
@@ -646,12 +636,18 @@ def _run_v2_backtest_window(
         benchmark_curve,
         init_cash,
     )
+    risk_free_returns, risk_free_stats = resolve_risk_free_returns(
+        vectorbt_payload.get("risk_free_rate"),
+        equity_curve.index.union(aligned_benchmark_curve.index),
+        periods_per_year,
+    )
     benchmark_stats = benchmark_summary(
         aligned_benchmark_curve,
         init_cash,
         benchmark_label,
         annualization_factor=periods_per_year,
         benchmark_mode=benchmark_mode,
+        risk_free=risk_free_returns,
     )
     comparison_period_stats = benchmark_comparison_period_summary(
         comparison_equity_curve,
@@ -669,6 +665,7 @@ def _run_v2_backtest_window(
         comparison_strategy_returns,
         benchmark_returns,
         annualization_factor=periods_per_year,
+        risk_free=risk_free_returns,
     )
     _, excess_equity_curve = compute_excess_curves(
         comparison_equity_curve,
@@ -685,10 +682,16 @@ def _run_v2_backtest_window(
         aligned_benchmark_curve,
         annualization_factor=periods_per_year,
     )
+    recent_extra_stats = compute_recent_extra_period_stats(
+        comparison_equity_curve,
+        aligned_benchmark_curve,
+        annualization_factor=periods_per_year,
+    )
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
         initial_cash=init_cash,
+        risk_free=risk_free_returns,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value
@@ -710,6 +713,8 @@ def _run_v2_backtest_window(
             regression_stats,
             recent_1y_stats,
             recent_2y_stats,
+            recent_extra_stats,
+            risk_free_stats,
             compute_drawdown_recovery_stats(equity_curve),
         ]
     )
@@ -790,6 +795,7 @@ def _build_stitched_summary(
     benchmark_mode: str,
     periods_per_year: int,
     segment_count: int,
+    risk_free_rate: object = None,
 ) -> pd.Series:
     # Strategy metrics start from init_cash so the first window's entry cost
     # counts (same anchor as strategy_performance_summary).
@@ -802,6 +808,11 @@ def _build_stitched_summary(
     )
     comparison_strategy_returns = compute_return_series(comparison_equity_curve)
     benchmark_returns = compute_return_series(aligned_benchmark_curve)
+    risk_free_returns, risk_free_stats = resolve_risk_free_returns(
+        risk_free_rate,
+        equity_curve.index.union(aligned_benchmark_curve.index),
+        periods_per_year,
+    )
     summary = pd.Series(
         {
             "Start Value": float(init_cash),
@@ -809,7 +820,12 @@ def _build_stitched_summary(
             "Total Return [%]": ((float(equity_curve.iloc[-1]) / float(init_cash)) - 1.0) * 100.0,
             "CAGR [%]": compute_annualized_return(anchored_curve, annualization_factor=periods_per_year) * 100.0,
             "Max Drawdown [%]": compute_max_drawdown_pct(anchored_curve),
-            "Sharpe Ratio": compute_sharpe_ratio(strategy_returns, annualization_factor=periods_per_year),
+            "Sharpe Ratio": compute_sharpe_ratio(
+                strategy_returns, annualization_factor=periods_per_year, risk_free=risk_free_returns),
+            "Modified Sharpe Ratio": compute_modified_sharpe_ratio(
+                strategy_returns, annualization_factor=periods_per_year, risk_free=risk_free_returns),
+            "Annualized Volatility [%]": compute_annualized_volatility_pct(
+                strategy_returns, annualization_factor=periods_per_year),
             "CVaR 5% Sharpe": compute_cvar_sharpe_ratio(
                 strategy_returns,
                 annualization_factor=periods_per_year,
@@ -820,7 +836,8 @@ def _build_stitched_summary(
                 anchored_curve,
                 annualization_factor=periods_per_year,
             ),
-            "Sortino Ratio": compute_sortino_ratio(strategy_returns, annualization_factor=periods_per_year),
+            "Sortino Ratio": compute_sortino_ratio(
+                strategy_returns, annualization_factor=periods_per_year, risk_free=risk_free_returns),
             "Deployment Segment Count": float(segment_count),
         }
     )
@@ -840,6 +857,7 @@ def _build_stitched_summary(
                 benchmark_label,
                 annualization_factor=periods_per_year,
                 benchmark_mode=benchmark_mode,
+                risk_free=risk_free_returns,
             ),
             compute_information_ratio(
                 comparison_strategy_returns,
@@ -850,6 +868,7 @@ def _build_stitched_summary(
                 comparison_strategy_returns,
                 benchmark_returns,
                 annualization_factor=periods_per_year,
+                risk_free=risk_free_returns,
             ),
             compute_recent_1y_stats(
                 comparison_equity_curve,
@@ -861,6 +880,12 @@ def _build_stitched_summary(
                 aligned_benchmark_curve,
                 annualization_factor=periods_per_year,
             ),
+            compute_recent_extra_period_stats(
+                comparison_equity_curve,
+                aligned_benchmark_curve,
+                annualization_factor=periods_per_year,
+            ),
+            risk_free_stats,
             compute_drawdown_recovery_stats(equity_curve),
         ]
     )
@@ -1291,6 +1316,7 @@ def main() -> None:
                 benchmark_mode=benchmark_mode,
                 periods_per_year=periods_per_year,
                 segment_count=len(stitched_equity_segments),
+                risk_free_rate=first_vectorbt_payload.get("risk_free_rate"),
             )
             stitched_equity_curve.to_frame(name="value").to_csv(
                 out_dir / "stitched_oos_equity_curve.csv",

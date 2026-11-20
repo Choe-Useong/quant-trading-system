@@ -16,6 +16,11 @@ DEFAULT_OUT_DIR = ROOT / "data" / "stocks_cache" / "kr_stock_daily"
 INDEX_PRICE_FILE = "index_price.parquet"
 DEFAULT_ETF_INDEX_RAW = ROOT / "data" / "kr_etfs" / "raw" / "ohlcv_pykrx.parquet"
 INDUSTRY_FREQUENCIES = {"monthly", "weekly", "daily"}
+CLOSE_SOURCES = {
+    # trade_price file, and where market_cap / amount / volume / market labels come from
+    "fdr": ("close_fdr.parquet", "marcap_daily.parquet"),
+    "krx": ("close_krx_adj.parquet", "krx_price_daily.parquet"),
+}
 
 MARCAP_VALUE_COLUMNS = {
     "market_cap": "Marcap",
@@ -32,10 +37,20 @@ MARKET_CODE_MAP = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build a v2 wide source cache for Korean stocks from raw marcap/FDR caches."
+        description="Build a v2 wide source cache for Korean stocks from raw marcap/FDR or KRX caches."
     )
     parser.add_argument("--raw-dir", default=str(DEFAULT_RAW_DIR))
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
+    parser.add_argument(
+        "--close-source",
+        choices=sorted(CLOSE_SOURCES),
+        default="krx",
+        help=(
+            "trade_price source (default krx; DATA-017/018/019). fdr: close_fdr.parquet (FinanceDataReader/Naver adjusted close) with marcap_daily "
+            "values. krx: close_krx_adj.parquet (KRX regular-session close adjusted by KRX base prices) with "
+            "krx_price_daily values; build both with build_kr_stock_raw_cache.py --include-krx-price."
+        ),
+    )
     parser.add_argument("--start", default="")
     parser.add_argument("--end", default="")
     parser.add_argument(
@@ -235,6 +250,27 @@ def _pivot_market_code(
     return frame.reindex(index=index, columns=columns).astype("float64")
 
 
+def _load_krx_marcap(raw_dir: Path, start: str, end: str, columns: list[str]) -> pd.DataFrame:
+    """krx_price_daily rows in the marcap layout; names come from marcap_daily when it has the code."""
+    marcap = pd.read_parquet(raw_dir / CLOSE_SOURCES["krx"][1], columns=["Date", "Code", "Market", *columns])
+    marcap["Date"] = pd.to_datetime(marcap["Date"]).dt.normalize()
+    marcap["Code"] = marcap["Code"].astype(str).map(_normalize_code)
+    marcap["Market"] = marcap["Market"].astype(str).str.upper()
+    if start:
+        marcap = marcap[marcap["Date"] >= pd.Timestamp(start).normalize()]
+    if end:
+        marcap = marcap[marcap["Date"] <= pd.Timestamp(end).normalize()]
+    names = pd.Series(dtype=str)
+    names_path = raw_dir / CLOSE_SOURCES["fdr"][1]
+    if names_path.exists():
+        named = pd.read_parquet(names_path, columns=["Date", "Code", "Name"])
+        named["Code"] = named["Code"].map(_normalize_code)
+        named = named[named["Name"].fillna("").astype(str).str.len() > 0]
+        names = named.sort_values("Date").drop_duplicates("Code", keep="last").set_index("Code")["Name"].astype(str)
+    marcap["Name"] = marcap["Code"].map(names).fillna("").astype(str)
+    return marcap
+
+
 def _build_market_meta(marcap: pd.DataFrame, columns: pd.Index) -> pd.DataFrame:
     if marcap.empty:
         latest = pd.DataFrame(columns=["Code", "Name", "Market"])
@@ -315,10 +351,14 @@ def _write_report(
     industry_frequency: str | None,
     industry_labels: pd.DataFrame | None,
     index_sources: dict[str, dict] | None = None,
+    close_source: str = "fdr",
 ) -> None:
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "raw_dir": str(raw_dir),
+        "close_source": close_source,
+        "close_file": CLOSE_SOURCES[close_source][0],
+        "market_value_file": CLOSE_SOURCES[close_source][1],
         "out_dir": str(out_dir),
         "rows": int(len(close)),
         "codes": int(len(close.columns)),
@@ -353,8 +393,9 @@ def main() -> int:
     args = parse_args()
     raw_dir = _resolve(args.raw_dir)
     out_dir = _resolve(args.out_dir)
-    close_path = raw_dir / "close_fdr.parquet"
-    marcap_path = raw_dir / "marcap_daily.parquet"
+    close_file, marcap_file = CLOSE_SOURCES[args.close_source]
+    close_path = raw_dir / close_file
+    marcap_path = raw_dir / marcap_file
     if not close_path.exists():
         raise FileNotFoundError(close_path)
     if not marcap_path.exists():
@@ -362,9 +403,12 @@ def main() -> int:
 
     close = _load_close(close_path, args.start, args.end)
     if close.empty or close.shape[1] == 0:
-        raise SystemExit("No close_fdr data available after date filtering")
+        raise SystemExit(f"No {close_file} data available after date filtering")
 
-    marcap = _load_marcap(marcap_path, args.start, args.end, list(MARCAP_VALUE_COLUMNS.values()))
+    if args.close_source == "krx":
+        marcap = _load_krx_marcap(raw_dir, args.start, args.end, list(MARCAP_VALUE_COLUMNS.values()))
+    else:
+        marcap = _load_marcap(marcap_path, args.start, args.end, list(MARCAP_VALUE_COLUMNS.values()))
     allowed_markets = _parse_markets(args.markets)
     if allowed_markets is not None:
         marcap = marcap[marcap["Market"].isin(allowed_markets)].copy()
@@ -439,6 +483,7 @@ def main() -> int:
         industry_frequency=args.industry_frequency if args.include_industry else None,
         industry_labels=industry_labels,
         index_sources=index_sources,
+        close_source=args.close_source,
     )
 
     print(f"Wrote Korean stock source cache to {out_dir}")

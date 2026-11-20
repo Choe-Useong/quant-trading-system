@@ -83,7 +83,9 @@ def _print_cache_summary(raw_dir: Path, source_cache_dir: Path) -> None:
     raw_report = _load_report(raw_dir / "download_report.json")
     source_report = _load_report(source_cache_dir / "source_cache_report.json")
     marcap_end = ((raw_report.get("marcap") or {}).get("end")) if raw_report else None
-    close_end = ((raw_report.get("close_fdr") or {}).get("end")) if raw_report else None
+    # The source cache uses the KRX price files when the raw update included them (--close-source krx).
+    close_report = (raw_report.get("krx_price") or {}).get("adjusted_close") if raw_report else None
+    close_end = ((close_report or raw_report.get("close_fdr") or {}).get("end")) if raw_report else None
     index_end = ((raw_report.get("index_price") or {}).get("end")) if raw_report else None
     source_end = source_report.get("end") if source_report else None
     print(f"raw_marcap_end={marcap_end}")

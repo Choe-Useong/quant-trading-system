@@ -67,6 +67,7 @@ from scripts.run_vectorbt import (
     compute_information_ratio,
     compute_recent_1y_stats,
     compute_recent_2y_stats,
+    compute_recent_extra_period_stats,
     compute_return_series,
     compute_rolling_information_ratio,
     infer_timeframe,
@@ -74,6 +75,7 @@ from scripts.run_vectorbt import (
     periods_per_day_for_timeframe,
     print_summary,
     resolve_periods_per_year,
+    resolve_risk_free_returns,
     summarize_rolling_information_ratio,
     strategy_performance_summary,
     timeframe_to_pandas_freq,
@@ -1317,7 +1319,9 @@ def _strategy_sleeve_request_frame(parts: list[dict[str, Any]], start, end=None)
     frames = []
     for part in parts:
         rows = part["frame"]
-        if not len(window):
+        if not len(window) or not len(rows.columns):
+            # A sleeve that never targets a market (for example a change_only signal that
+            # stays off over the whole history) has no requests and no state to restore.
             frames.append(rows.iloc[0:0])
             continue
         first = window[0]
@@ -1335,6 +1339,45 @@ def _strategy_sleeve_request_frame(parts: list[dict[str, Any]], start, end=None)
     return merged.reindex(window)
 
 
+def _cached_price_frame(
+    price_frame_cache: dict,
+    candle_dir: Path,
+    source_cache_dir: Path,
+    price_column: str,
+    required_markets: list[str] | None,
+    max_markets: int | None,
+) -> pd.DataFrame:
+    """Price frame for the requested markets from one cached frame per column.
+
+    Explicit market lists are column slices of a cached superset that grows to
+    the union of requests, so candidates and walk-forward windows with
+    different market sets share one full-history frame instead of each adding
+    one. The cache reader selects columns only (sorted, missing as NaN), so a
+    slice equals a direct read. Callers receive their own frame.
+    """
+    if required_markets is None:
+        key = (str(candle_dir), str(source_cache_dir), price_column, (), max_markets)
+        frame = price_frame_cache.get(key)
+        if frame is None:
+            frame = load_price_frame(candle_dir, price_column, load_mode="wide", source_cache_dir=source_cache_dir)
+            if max_markets is not None:
+                frame = frame.reindex(columns=sorted(frame.columns)[:max_markets])
+            price_frame_cache[key] = frame
+        return frame
+    requested = sorted({str(market).upper() for market in required_markets})
+    key = ("superset", str(candle_dir), str(source_cache_dir), price_column, max_markets)
+    superset = price_frame_cache.get(key)
+    if superset is None or not set(requested).issubset(superset.columns):
+        union = sorted(set(requested) | (set(superset.columns) if superset is not None else set()))
+        # Release the old superset before reading its replacement.
+        price_frame_cache.pop(key, None)
+        superset = None
+        superset = load_price_frame(candle_dir, price_column, load_mode="wide",
+                                    source_cache_dir=source_cache_dir, market_columns=union)
+        price_frame_cache[key] = superset
+    return superset.reindex(columns=requested)
+
+
 def _validate_strategy_sleeve_run(vectorbt_payload: dict[str, Any], preselection: dict | None) -> None:
     if preselection is not None:
         raise ValueError("strategy_sleeves cannot be combined with preselection")
@@ -1349,6 +1392,151 @@ def _strategy_sleeve_metadata(parts: list[dict[str, Any]]) -> list[dict[str, Any
              "change_only": part["change_only"],
              "shared_markets": sorted(str(c) for c in part["frame"].columns if owners[str(c)] > 1)}
             for part in parts]
+
+
+def build_target_request_frame_v2(
+    source_cache_dir: Path,
+    feature_frames: dict[str, pd.DataFrame],
+    warning_frame: pd.DataFrame,
+    universe_payload: dict[str, Any],
+    weight_payload: dict[str, Any],
+    vectorbt_payload: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Target requests _run_v2_backtest passes to the engine for one candidate.
+
+    Same steps and order as _run_v2_backtest without its caches and price
+    loading: strategy sleeve parts and merge, or universe -> weights ->
+    change_only, column pruning and start trimming. Rows are execution-bar
+    opening times; NaN keeps the quantity, 0 closes. Preselection is not
+    supported. Live runners use this so their targets follow the backtest;
+    tests compare it with the grid's engine input.
+    """
+    sleeves = load_strategy_sleeves_from_payload(weight_payload)
+    reference_index = next(iter(feature_frames.values())).index
+    warning_frame = warning_frame.reindex(index=reference_index)
+    sleeve_parts = None
+    weight_spec = None
+    change_only_weights = False
+    if sleeves is not None:
+        _validate_strategy_sleeve_run(vectorbt_payload, None)
+        sleeve_parts, data_exclusions = _build_strategy_sleeve_parts(
+            source_cache_dir, feature_frames, warning_frame, universe_payload, sleeves, vectorbt_payload)
+        active = np.zeros(len(reference_index), dtype=float)
+        for part in sleeve_parts:
+            rows = part["frame"]
+            nonzero_rows = rows.index[rows.fillna(0.0).ne(0.0).any(axis=1).to_numpy()]
+            active[reference_index.get_indexer(nonzero_rows)] = 1.0
+        weight_frame = pd.DataFrame({"__sleeve_activity__": active}, index=reference_index)
+    else:
+        universe_spec = load_universe_spec_from_payload(universe_payload)
+        weight_spec = load_weight_spec_from_payload(weight_payload)
+        validate_holding_selection_config(universe_spec, weight_spec, vectorbt_payload)
+        selection_start = holding_selection_start(vectorbt_payload) if universe_spec.holding is not None else None
+        universe_spec, data_exclusions = apply_observed_universe_policy_v2(
+            source_cache_dir, reference_index, next(iter(feature_frames.values())).columns, universe_spec, vectorbt_payload,
+            required_markets=[weight_spec.hedge.market] if weight_spec.hedge is not None else ())
+        universe_result = build_universe_mask_v2(
+            feature_frames, warning_frame, universe_spec, selection_start=selection_start)
+        weight_frame = build_weight_frame_v2(universe_result.selection_mask, weight_spec, feature_frames,
+                                             base_eligible_mask=universe_result.base_eligible_mask)
+        del universe_result
+        change_only_weights = is_change_only_weight_output(weight_spec)
+        if change_only_weights:
+            weight_frame = weight_frame.ffill().fillna(0.0)
+        if _resolve_prune_inactive_price_columns(
+                vectorbt_payload, has_explicit_universe_markets=bool(universe_spec.allowed_markets)):
+            keep_markets = {weight_spec.hedge.market} if weight_spec.hedge is not None else set()
+            weight_frame = _prune_inactive_target_columns(weight_frame, keep_markets=keep_markets)
+    trim_start_mode = str(vectorbt_payload.get("trim_start_mode", "none"))
+    if trim_start_mode == "timestamp":
+        trim_start_timestamp_value = vectorbt_payload.get("trim_start_timestamp")
+        if trim_start_timestamp_value is None:
+            raise ValueError("trim_start_mode='timestamp' requires vectorbt_spec.trim_start_timestamp")
+        weight_frame = weight_frame.loc[weight_frame.index >= pd.Timestamp(str(trim_start_timestamp_value))]
+    else:
+        _, weight_frame, _ = trim_frames_to_first_weight(weight_frame, weight_frame, mode=trim_start_mode)
+    if change_only_weights:
+        weight_frame = to_change_only_target_frame(weight_frame, scope=weight_spec.change_only_scope)
+    if sleeve_parts is not None:
+        weight_frame = _strategy_sleeve_request_frame(
+            sleeve_parts, weight_frame.index.min() if len(weight_frame.index) else None)
+    info = {"data_exclusions": data_exclusions,
+            "strategy_sleeves": _strategy_sleeve_metadata(sleeve_parts) if sleeve_parts is not None else None}
+    return weight_frame, info
+
+
+def build_candidate_target_requests(
+    config: dict[str, Any],
+    combo: dict[str, Any],
+    source_cache_dir: Path,
+    *,
+    excluded_markets: Any = (),
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Target requests of one grid candidate (config + combo) from a source cache.
+
+    Renders the candidate and prepares features and warnings the way the grid
+    does, then returns build_target_request_frame_v2's result. source_cache_dir
+    may be any cache in the same wide format (for example a live cache), so
+    the config's own source_cache_dir is not read. Preselection is rejected.
+
+    excluded_markets are added to the account universe and every sleeve
+    universe after features are built, the way the observed-data policy adds
+    its exclusions. A live cache uses it to repeat the research cache's
+    whole-period data-policy exclusions, which a short REST history cannot see.
+    """
+    if config.get("preselection") is not None:
+        raise ValueError("build_candidate_target_requests does not support preselection")
+    context = dict(combo)
+    context["run_name"] = config["run_name_template"].format(**context)
+    universe_payload = _render_value(config["universe_spec_template"], context)
+    weight_payload = _render_value(config["weight_spec_template"], context)
+    vectorbt_payload = _render_backtest_payload(config, context)
+    market_score_spec_path = config.get("market_scores_spec_json")
+    static_market_score_spec = (
+        load_market_score_spec(Path(str(market_score_spec_path))) if market_score_spec_path else None)
+    market_score_payload = (
+        _render_value(config["market_scores_spec_template"], context)
+        if config.get("market_scores_spec_template") is not None else None)
+    weight_market_score_payload = (
+        _render_value(config["weight_market_scores_spec_template"], context)
+        if config.get("weight_market_scores_spec_template") is not None else None)
+    market_score_spec = (
+        load_market_score_spec_from_payload(market_score_payload)
+        if market_score_payload is not None else static_market_score_spec)
+    weight_market_score_spec = (
+        load_market_score_spec_from_payload(weight_market_score_payload)
+        if weight_market_score_payload is not None else None)
+    builder = CandidateFeatureBuilder(config, [dict(combo)], source_cache_dir,
+                                      static_market_score_spec=static_market_score_spec,
+                                      preselection_plans=None, project_shared=True)
+    feature_frames, required_feature_markets = builder.candidate(
+        universe_payload=universe_payload,
+        feature_payload=builder.candidate_feature_payload(context),
+        market_score_payload=market_score_payload,
+        market_score_spec=market_score_spec,
+        weight_market_score_spec=weight_market_score_spec,
+        data_usage_starts=funding_usage_starts_v2(source_cache_dir, vectorbt_payload),
+    )
+    warning_frame = _read_warning_frame(
+        source_cache_dir,
+        market_columns=required_feature_markets,
+        max_markets=None if required_feature_markets is not None else config.get("max_markets"),
+        require_warning=bool(load_universe_spec_from_payload(universe_payload).exclude_warnings),
+    )
+    extra = sorted({str(market).upper() for market in excluded_markets})
+    if extra:
+        def exclude(payload):
+            return {**payload, "excluded_markets": sorted(set(payload.get("excluded_markets") or ()) | set(extra))}
+        universe_payload = exclude(universe_payload)
+        if load_strategy_sleeves_from_payload(weight_payload) is not None:
+            weight_payload = {**weight_payload, "strategy_sleeves": [
+                {**sleeve, "universe_spec": exclude(sleeve["universe_spec"])} if sleeve.get("universe_spec") is not None
+                else sleeve for sleeve in weight_payload["strategy_sleeves"]]}
+    frame, info = build_target_request_frame_v2(
+        source_cache_dir, feature_frames, warning_frame, universe_payload, weight_payload, vectorbt_payload)
+    info.update(run_name=context["run_name"], excluded_markets=extra, universe_payload=universe_payload,
+                weight_payload=weight_payload, backtest_payload=vectorbt_payload)
+    return frame, info
 
 
 def _run_v2_backtest(
@@ -1471,26 +1659,8 @@ def _run_v2_backtest(
     for market in (vectorbt_payload.get("benchmark_fixed_weights") or {}).keys():
         required_price_market_set.add(str(market).upper())
     required_price_markets = sorted(required_price_market_set) if required_price_market_set else None
-
-    price_cache_key = (
-        str(candle_dir),
-        str(source_cache_dir),
-        price_column,
-        tuple(required_price_markets) if required_price_markets is not None else (),
-        max_markets,
-    )
-    price_frame = price_frame_cache.get(price_cache_key)
-    if price_frame is None:
-        price_frame = load_price_frame(
-            candle_dir,
-            price_column,
-            load_mode="wide",
-            source_cache_dir=source_cache_dir,
-            market_columns=required_price_markets,
-        )
-        if required_price_markets is None and max_markets is not None:
-            price_frame = price_frame.reindex(columns=sorted(price_frame.columns)[:max_markets])
-        price_frame_cache[price_cache_key] = price_frame
+    price_frame = _cached_price_frame(
+        price_frame_cache, candle_dir, source_cache_dir, price_column, required_price_markets, max_markets)
     benchmark_price_frame = None
     if benchmark_mode == "single_market" and not benchmark_uses_strategy_price_frame:
         benchmark_price_markets = [benchmark_market]
@@ -1600,12 +1770,18 @@ def _run_v2_backtest(
         benchmark_curve,
         init_cash,
     )
+    risk_free_returns, risk_free_stats = resolve_risk_free_returns(
+        vectorbt_payload.get("risk_free_rate"),
+        equity_curve.index.union(aligned_benchmark_curve.index),
+        periods_per_year,
+    )
     benchmark_stats = benchmark_summary(
         aligned_benchmark_curve,
         init_cash,
         benchmark_label,
         annualization_factor=periods_per_year,
         benchmark_mode=benchmark_mode,
+        risk_free=risk_free_returns,
     )
     comparison_period_stats = benchmark_comparison_period_summary(
         comparison_equity_curve,
@@ -1623,6 +1799,7 @@ def _run_v2_backtest(
         comparison_strategy_returns,
         benchmark_returns,
         annualization_factor=periods_per_year,
+        risk_free=risk_free_returns,
     )
     excess_returns, excess_equity_curve = compute_excess_curves(
         comparison_equity_curve,
@@ -1646,11 +1823,17 @@ def _run_v2_backtest(
         aligned_benchmark_curve,
         annualization_factor=periods_per_year,
     )
+    recent_extra_stats = compute_recent_extra_period_stats(
+        comparison_equity_curve,
+        aligned_benchmark_curve,
+        annualization_factor=periods_per_year,
+    )
     rolling_ir_summary = summarize_rolling_information_ratio(rolling_ir)
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
         initial_cash=init_cash,
+        risk_free=risk_free_returns,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value
@@ -1672,6 +1855,8 @@ def _run_v2_backtest(
             regression_stats,
             recent_1y_stats,
             recent_2y_stats,
+            recent_extra_stats,
+            risk_free_stats,
             compute_drawdown_recovery_stats(equity_curve),
             rolling_ir_summary,
         ]
@@ -1768,7 +1953,11 @@ def _run_grid_candidates(config, candle_dir, source_cache_dir, out_dir, combinat
     node_frame_cache = FeatureFrameCache()
     source_frame_cache: dict[tuple[tuple[str, ...], tuple[str, ...], int | None], dict[str, pd.DataFrame]] = {}
     price_frame_cache: dict[tuple[str, str, str, tuple[str, ...], int | None], pd.DataFrame] = {}
-    prepared_cache: dict[str, Any] = {}
+    # The numba preparation cache keeps one full set of execution arrays for the
+    # next candidate. strategy_sleeves candidates request different market
+    # unions, so it rarely hits and only overlaps the next candidate's peak.
+    prepared_cache: dict[str, Any] | None = (
+        None if _config_uses_strategy_sleeves(config, combinations) else {})
     warning_frame_cache: dict[tuple[tuple[str, ...], int | None], pd.DataFrame] = {}
     universe_cache: dict[tuple[Any, ...], Any] = {}
     universe_rank_cache: dict[tuple[object, ...], pd.DataFrame] = {}

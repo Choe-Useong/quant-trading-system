@@ -186,12 +186,43 @@ def _rows_for_order(rows: list[dict[str, Any]], order: dict[str, Any]) -> tuple[
     order_no = str(order.get("order_no") or "").strip()
     symbol = str(order.get("symbol") or "").upper().strip()
     if order_no:
-        matched = [row for row in rows if order_no in _order_no_candidates(row)]
-        if matched:
-            return matched, False
+        # An order number identifies the order. Falling back to the symbol would count
+        # other orders of the same symbol in the query window as this order's fills.
+        exact = [row for row in rows if str(row.get("odno") or row.get("ODNO") or "").strip() == order_no]
+        if exact:
+            return exact, False
+        return [row for row in rows if order_no in _order_no_candidates(row)], False
     if symbol:
         return [row for row in rows if symbol in _symbol_candidates(row)], True
     return [], True
+
+
+# KIS inquire-ccnl prcs_stat_name for an order that is no longer working
+# (filled, or ended by day-end expiry, cancel, or reject).
+CLOSED_STATUS_NAMES = {"완료"}
+
+
+def _order_state(
+    matched_rows: list[dict[str, Any]],
+    *,
+    expected_qty: int,
+    filled_qty: float | None,
+    open_qty: float | None,
+) -> str:
+    if not matched_rows:
+        return "not_found"
+    if filled_qty is not None and filled_qty >= expected_qty > 0:
+        return "filled"
+    status_names = {str(row.get("prcs_stat_name") or "").strip() for row in matched_rows}
+    if (
+        filled_qty is not None
+        and open_qty is not None
+        and open_qty <= 0
+        and status_names
+        and status_names <= CLOSED_STATUS_NAMES
+    ):
+        return "closed_unfilled"
+    return "open"
 
 
 def _summarize_order_fill(rows: list[dict[str, Any]], order: dict[str, Any], *, fill_filter: str) -> dict[str, Any]:
@@ -230,6 +261,16 @@ def _summarize_order_fill(rows: list[dict[str, Any]], order: dict[str, Any], *, 
         "qty_known": qty_known,
         "weak_symbol_match": weak_match,
         "fully_filled": fully_filled,
+        "order_state": _order_state(
+            matched_rows,
+            expected_qty=expected_qty,
+            filled_qty=filled_qty,
+            open_qty=open_qty,
+        ),
+        "status_names": sorted({str(row.get("prcs_stat_name") or "").strip() for row in matched_rows}),
+        "reject_reasons": sorted(
+            {str(row.get("rjct_rson_name") or "").strip() for row in matched_rows} - {""}
+        ),
     }
 
 
@@ -271,6 +312,12 @@ def main() -> int:
     ]
     fully_filled_count = sum(1 for item in order_fill_status if item["fully_filled"])
     weak_match_used = any(item["weak_symbol_match"] for item in order_fill_status)
+    closed_unfilled_count = sum(1 for item in order_fill_status if item["order_state"] == "closed_unfilled")
+    all_closed = (
+        bool(submitted)
+        and not weak_match_used
+        and all(item["order_state"] in {"filled", "closed_unfilled"} for item in order_fill_status)
+    )
     report = {
         "type": "stock_live_fill_report_v1",
         "fill_report_id": f"fills_{short_hash({'start': start_date, 'end': end_date, 'rows': matched})}",
@@ -289,6 +336,8 @@ def main() -> int:
         "fully_filled_count": fully_filled_count,
         "all_submitted_orders_fully_filled": bool(submitted) and fully_filled_count == len(submitted),
         "weak_match_used": weak_match_used,
+        "closed_unfilled_count": closed_unfilled_count,
+        "all_submitted_orders_closed": all_closed,
         "order_fill_status": order_fill_status,
         "matched_rows": matched,
     }

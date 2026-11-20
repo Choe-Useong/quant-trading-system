@@ -415,21 +415,19 @@ def _spec_dependencies(
         return [component.feature_column for component in spec.components]
     if spec.source is None:
         return []
+    # Custom cache inputs are external unless source columns are requested, but
+    # their step references are graph features and must still be ordered first.
+    source_reference: str | None
     if spec.source.startswith("market:"):
         _, column = _parse_market_source(spec.source)
-        if not include_source_columns:
-            if column in supported_source_columns:
-                return []
-            _, raw_column = _split_market_source(spec.source)
-            return [] if _is_custom_source(raw_column) else [column]
         source_reference = column
+        if not include_source_columns and _is_custom_source(_split_market_source(spec.source)[1]):
+            source_reference = None
     elif _is_custom_source(spec.source):
-        if not include_source_columns:
-            return []
-        source_reference = _parse_custom_source(spec.source)
+        source_reference = _parse_custom_source(spec.source) if include_source_columns else None
     else:
         source_reference = spec.source
-    if source_reference in supported_source_columns and not include_source_columns:
+    if source_reference is None or (source_reference in supported_source_columns and not include_source_columns):
         dependencies: list[str] = []
     else:
         dependencies = [source_reference]

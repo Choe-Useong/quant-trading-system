@@ -429,6 +429,43 @@ def _long_short_signals(selection, spec, frames, base_eligible_mask):
                    long_filter=None, short_filter=None), resolved_frames
 
 
+def _leg_target_frame(members, exposure, selection, spec, frames, side):
+    """Split one side's exposure over its members (rows = rebalance rows).
+
+    Without a weight feature members share the exposure equally. With one,
+    each member gets exposure * w / sum(w) over that row's members, so the side
+    total is unchanged. Member weights must be finite and positive; weights of
+    non-members are ignored.
+    """
+    feature = getattr(spec, f"{side}_weight_feature")
+    if feature is None:
+        return members.astype(float).mul(exposure).div(
+            members.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    if frames is None or feature not in frames:
+        raise ValueError(f"Missing {side} weight feature for weights_v2: {feature}")
+    weights = frames[feature]
+    if not weights.index.equals(selection.index) or not weights.columns.equals(selection.columns):
+        weights = weights.reindex(index=selection.index, columns=selection.columns)
+    # Read only the rebalance rows (shifted by the lag) instead of copying the
+    # whole frame; rows before the lagged history are missing.
+    rows = selection.index.get_indexer(members.index) - getattr(spec, f"{side}_weight_lag")
+    values = np.full(members.shape, np.nan)
+    available = rows >= 0
+    values[available] = weights.to_numpy(dtype=float)[rows[available]]
+    mask = members.to_numpy(dtype=bool)
+    finite = np.isfinite(values)
+    invalid = mask & ~(finite & (np.where(finite, values, 0.0) > 0.0))
+    if invalid.any():
+        row, column = np.argwhere(invalid)[0]
+        raise ValueError(
+            f"{side}_weight_feature must be finite and positive for selected markets: {feature} "
+            f"is {values[row, column]} for {members.columns[column]} at {members.index[row]}")
+    raw = np.where(mask, values, 0.0)
+    totals = raw.sum(axis=1, keepdims=True)
+    target = np.divide(raw * exposure, totals, out=np.zeros_like(raw), where=totals > 0.0)
+    return pd.DataFrame(target, index=members.index, columns=members.columns)
+
+
 def _long_short_equal_target_frame(selection, spec, scores, scale, rebalance_dates, frames=None):
     if scores is None:
         raise ValueError("long_short_equal requires position scores")
@@ -439,10 +476,8 @@ def _long_short_equal_target_frame(selection, spec, scores, scale, rebalance_dat
     values = scores.loc[index]
     longs = selected & values.gt(0)
     shorts = selected & values.lt(0)
-    long_target = longs.astype(float).mul(float(spec.long_exposure)).div(
-        longs.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
-    short_target = shorts.astype(float).mul(float(spec.short_exposure)).div(
-        shorts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    long_target = _leg_target_frame(longs, float(spec.long_exposure), selection, spec, frames, "long")
+    short_target = _leg_target_frame(shorts, float(spec.short_exposure), selection, spec, frames, "short")
     for side, target_side in (("long", long_target), ("short", short_target)):
         side_scale = _exposure_scale_series(selection, spec, frames, side=side)
         if side_scale is not None:
@@ -1190,6 +1225,22 @@ def build_weight_frame_v2(
             raise ValueError(f"{side}_exposure_lag requires {side}_exposure_feature")
         if feature is not None and spec.weighting != "long_short_equal":
             raise ValueError("Side exposure features require weighting='long_short_equal'")
+        feature = getattr(spec, f"{side}_weight_feature")
+        lag = getattr(spec, f"{side}_weight_lag")
+        if type(lag) is not int or lag < 0:
+            raise ValueError(f"{side}_weight_lag must be a non-negative integer")
+        if feature is not None and (not isinstance(feature, str) or not feature.strip()):
+            raise ValueError(f"{side}_weight_feature must be a non-empty feature name")
+        if lag and feature is None:
+            raise ValueError(f"{side}_weight_lag requires {side}_weight_feature")
+        if feature is not None and spec.weighting != "long_short_equal":
+            raise ValueError("Side weight features require weighting='long_short_equal'")
+        if feature is not None and is_change_only_weight_output(spec):
+            # Continuously changing member weights would turn change_only into
+            # per-bar rebalancing of every held market.
+            raise ValueError("Side weight features cannot be combined with change_only output")
+    if spec.target_average is not None:
+        return _target_average_frame(selection_mask, spec, feature_frames, base_eligible_mask)
     if spec.weighting == "long_short_equal":
         spec, feature_frames = _long_short_signals(selection_mask, spec, feature_frames, base_eligible_mask)
     usage = feature_frames.get(CACHE_ELIGIBILITY_FRAME) if feature_frames is not None else None
@@ -1203,6 +1254,70 @@ def build_weight_frame_v2(
         if market in target and (target[market].fillna(0).ne(0) & ~target_eligible[market]).any():
             raise ValueError(f"Hedge market is outside cache data usage history: {market}")
     return target.where(target_eligible, 0.0)
+
+
+TARGET_AVERAGE_WEIGHTINGS = ("long_short_equal", "equal", "fixed")
+
+
+def _validate_target_average(spec: WeightSpec) -> None:
+    if spec.weighting not in TARGET_AVERAGE_WEIGHTINGS:
+        raise ValueError(f"target_average supports weighting {list(TARGET_AVERAGE_WEIGHTINGS)} only")
+    if is_change_only_weight_output(spec):
+        raise ValueError("target_average cannot be combined with change_only output")
+    if _normalize_frequency(spec.output_mode) not in {"", "dense"}:
+        raise ValueError("target_average requires the default output_mode")
+    for name in ("hedge", "portfolio_vol_target", "defensive_sleeve"):
+        if getattr(spec, name) is not None:
+            raise ValueError(f"target_average cannot be combined with {name}")
+    if spec.gross_exposure_update_frequency:
+        raise ValueError("target_average cannot be combined with gross_exposure_update_frequency")
+
+
+def _target_average_frame(
+    selection_mask: pd.DataFrame,
+    spec: WeightSpec,
+    feature_frames: dict[str, pd.DataFrame] | None,
+    base_eligible_mask: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Targets computed on the schedule, averaged over the latest periods.
+
+    Each schedule row requests the average of the targets computed on that
+    row and the earlier schedule rows (no later data). A NaN target cell keeps
+    that market's previous schedule target, as a sleeve keeps its latest
+    target. Before `periods` schedule rows exist the first schedule target
+    fills the missing ones. Rows between schedule rows hold (NaN);
+    cache-ineligible cells are zero on every row, as in the ordinary output.
+    """
+    _validate_target_average(spec)
+    average = spec.target_average
+    base_spec = replace(spec, target_average=None, rebalance_frequency=average.frequency)
+    raw = build_weight_frame_v2(selection_mask, base_spec, feature_frames, base_eligible_mask=base_eligible_mask)
+    schedule = _rebalance_mask(raw.index, average.frequency).to_numpy(dtype=bool)
+    targets = raw.loc[schedule].ffill().fillna(0.0)
+    del raw
+    values = targets.to_numpy(dtype=float)
+    averaged = np.empty_like(values)
+    if len(values):
+        # The first schedule target stands in for the periods before the data:
+        # weekday sleeves all rebalance on the first row (it opens every bucket)
+        # and keep that target until their own weekday.
+        if average.method == "mean":
+            padded = np.vstack([np.repeat(values[:1], average.periods - 1, axis=0), values])
+            sums = pd.DataFrame(padded).rolling(average.periods).sum().to_numpy()
+            averaged = sums[average.periods - 1:] / float(average.periods)
+        else:
+            state = values[0].copy()
+            alpha = 1.0 / float(average.periods)
+            for row in range(values.shape[0]):
+                state = state + alpha * (values[row] - state)
+                averaged[row] = state
+    result = pd.DataFrame(np.nan, index=selection_mask.index, columns=selection_mask.columns)
+    result.loc[schedule, :] = averaged
+    usage = feature_frames.get(CACHE_ELIGIBILITY_FRAME) if feature_frames is not None else None
+    if usage is not None:
+        eligible = usage.reindex(index=result.index, columns=result.columns).eq(True)
+        result = result.where(eligible, 0.0)
+    return result
 
 
 def _build_weight_frame_v2(

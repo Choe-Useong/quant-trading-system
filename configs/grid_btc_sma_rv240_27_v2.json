@@ -149,7 +149,11 @@
     "benchmark_market": "KRW-BTC",
     "benchmark_mode": "single_market",
     "trim_start_mode": "timestamp",
-    "trim_start_timestamp": "2019-09-25 03:00:00"
+    "trim_start_timestamp": "2019-09-25 03:00:00",
+    "risk_free_rate": {
+      "file": "data/macro/risk_free_rates_wide.csv",
+      "column": "KR_CD91"
+    }
   },
   "grid": {
     "short": [

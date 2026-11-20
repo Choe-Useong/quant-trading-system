@@ -17,7 +17,7 @@ param(
 
     [string]$ProfileJson = "",
 
-    [string]$LimitBufferPct = "0.50",
+    [string]$LimitBufferPct = "2.0",
 
     [string]$BootstrapPolicy = "",
 

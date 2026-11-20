@@ -36,7 +36,8 @@ from scripts.kr_stocks.dart_xbrl import (  # noqa: E402
 )
 
 DEFAULT_RAW_DIR = ROOT / "data" / "kr_stocks" / "raw"
-DEFAULT_CLOSE_FILE = DEFAULT_RAW_DIR / "close_fdr.parquet"
+# Candidate codes come from the KRX price file, which keeps delisted codes (DATA-019).
+DEFAULT_CLOSE_FILE = DEFAULT_RAW_DIR / "close_krx_adj.parquet"
 
 DART_CORP_CODE_URL = "https://opendart.fss.or.kr/api/corpCode.xml"
 DART_COMPANY_URL = "https://opendart.fss.or.kr/api/company.json"

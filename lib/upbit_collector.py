@@ -13,6 +13,8 @@ from typing import Iterator
 
 
 BASE_URL = "https://api.upbit.com"
+# Bithumb serves the same /v1 market and candle formats; its candle `to` is read as KST.
+EXCHANGE_BASE_URLS = {"upbit": BASE_URL, "bithumb": "https://api.bithumb.com"}
 DEFAULT_PAUSE_SECONDS = 0.12
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_REQUEST_RETRIES = 8
@@ -47,12 +49,14 @@ class CandleRow:
         return asdict(self)
 
 
-def request_json(path: str, params: dict[str, object] | None = None) -> list[dict[str, object]]:
+def request_json(
+    path: str, params: dict[str, object] | None = None, base_url: str = BASE_URL
+) -> list[dict[str, object]]:
     query = ""
     if params:
         query = "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(
-        f"{BASE_URL}{path}{query}",
+        f"{base_url}{path}{query}",
         headers={
             "Accept": "application/json",
             "User-Agent": "coin-project-upbit-collector/1.0",
@@ -77,8 +81,10 @@ def request_json(path: str, params: dict[str, object] | None = None) -> list[dic
     raise RuntimeError(f"Request failed unexpectedly for {path}")
 
 
-def list_markets(quote: str = "KRW", include_warnings: bool = True) -> list[Market]:
-    payload = request_json("/v1/market/all", {"isDetails": "true"})
+def list_markets(
+    quote: str = "KRW", include_warnings: bool = True, base_url: str = BASE_URL
+) -> list[Market]:
+    payload = request_json("/v1/market/all", {"isDetails": "true"}, base_url=base_url)
     prefix = f"{quote.upper()}-"
     markets: list[Market] = []
     for item in payload:
@@ -102,13 +108,14 @@ def fetch_daily_candle_batch(
     market: Market,
     count: int,
     to: str | None = None,
+    base_url: str = BASE_URL,
 ) -> list[CandleRow]:
     params: dict[str, object] = {"market": market.market, "count": count}
     if to:
         params["to"] = to
 
     try:
-        payload = request_json("/v1/candles/days", params)
+        payload = request_json("/v1/candles/days", params, base_url=base_url)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"{market.market}: HTTP {exc.code}") from exc
 
@@ -177,13 +184,14 @@ def iter_daily_candle_batches(
     batch_size: int = DEFAULT_BATCH_SIZE,
     pause_seconds: float = DEFAULT_PAUSE_SECONDS,
     to: str | None = None,
+    base_url: str = BASE_URL,
 ) -> Iterator[list[CandleRow]]:
     remaining = days
     cursor = to
 
     while remaining is None or remaining > 0:
         request_count = batch_size if remaining is None else min(batch_size, remaining)
-        batch = fetch_daily_candle_batch(market=market, count=request_count, to=cursor)
+        batch = fetch_daily_candle_batch(market=market, count=request_count, to=cursor, base_url=base_url)
         if not batch:
             break
 
@@ -206,6 +214,7 @@ def collect_daily_candles(
     batch_size: int = DEFAULT_BATCH_SIZE,
     pause_seconds: float = DEFAULT_PAUSE_SECONDS,
     to: str | None = None,
+    base_url: str = BASE_URL,
     ) -> list[CandleRow]:
     rows: list[CandleRow] = []
     for batch in iter_daily_candle_batches(
@@ -214,6 +223,7 @@ def collect_daily_candles(
         batch_size=batch_size,
         pause_seconds=pause_seconds,
         to=to,
+        base_url=base_url,
     ):
         rows.extend(batch)
     rows.sort(key=lambda row: row.date_utc)

@@ -33,6 +33,7 @@ from scripts.run_vectorbt import (
     compute_information_ratio,
     compute_recent_1y_stats,
     compute_recent_2y_stats,
+    compute_recent_extra_period_stats,
     compute_return_series,
     compute_rolling_information_ratio,
     infer_timeframe,
@@ -40,6 +41,7 @@ from scripts.run_vectorbt import (
     periods_per_day_for_timeframe,
     print_summary,
     resolve_periods_per_year,
+    resolve_risk_free_returns,
     summarize_rolling_information_ratio,
     strategy_performance_summary,
     timeframe_to_pandas_freq,
@@ -96,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--benchmark-fixed-weights-json",
         default="",
         help="Optional JSON object of fixed weights for portfolio_group_rebalance benchmark",
+    )
+    parser.add_argument(
+        "--risk-free-rate-json",
+        default="",
+        help=(
+            "Optional risk-free rate for Sharpe, Sortino, modified Sharpe and Jensen alpha: "
+            '{"annual_pct": 3.0} or {"file": "data/macro/risk_free_rates_wide.csv", "column": "KR_CD91"}. '
+            "Omitted means 0."
+        ),
     )
     parser.add_argument(
         "--benchmark-rebalance-frequency",
@@ -356,12 +367,18 @@ def main() -> None:
         benchmark_curve,
         args.init_cash,
     )
+    risk_free_returns, risk_free_stats = resolve_risk_free_returns(
+        json.loads(args.risk_free_rate_json) if args.risk_free_rate_json else None,
+        equity_curve.index.union(aligned_benchmark_curve.index),
+        periods_per_year,
+    )
     benchmark_stats = benchmark_summary(
         aligned_benchmark_curve,
         args.init_cash,
         benchmark_label,
         annualization_factor=periods_per_year,
         benchmark_mode=args.benchmark_mode,
+        risk_free=risk_free_returns,
     )
     comparison_period_stats = benchmark_comparison_period_summary(
         comparison_equity_curve,
@@ -378,6 +395,7 @@ def main() -> None:
         comparison_strategy_returns,
         benchmark_returns,
         annualization_factor=periods_per_year,
+        risk_free=risk_free_returns,
     )
     excess_returns, excess_equity_curve = compute_excess_curves(
         comparison_equity_curve,
@@ -399,11 +417,17 @@ def main() -> None:
         aligned_benchmark_curve,
         annualization_factor=periods_per_year,
     )
+    recent_extra_stats = compute_recent_extra_period_stats(
+        comparison_equity_curve,
+        aligned_benchmark_curve,
+        annualization_factor=periods_per_year,
+    )
     rolling_ir_summary = summarize_rolling_information_ratio(rolling_ir)
     strategy_stats = strategy_performance_summary(
         equity_curve,
         annualization_factor=periods_per_year,
         initial_cash=args.init_cash,
+        risk_free=risk_free_returns,
     )
     for metric_name, metric_value in strategy_stats.items():
         summary.loc[metric_name] = metric_value
@@ -426,6 +450,8 @@ def main() -> None:
             regression_stats,
             recent_1y_stats,
             recent_2y_stats,
+            recent_extra_stats,
+            risk_free_stats,
             compute_drawdown_recovery_stats(equity_curve),
             rolling_ir_summary,
         ]

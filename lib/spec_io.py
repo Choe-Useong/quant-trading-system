@@ -22,6 +22,7 @@ from lib.specs import (
     RankFilterSpec,
     ScoreComponentSpec,
     StateSpec,
+    TargetAverageSpec,
     TransformSpec,
     UniverseSpec,
     ValueFilterSpec,
@@ -373,7 +374,30 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
     change_only_scope = payload.get("change_only_scope", "portfolio")
     if change_only_scope not in ("portfolio", "asset"):
         raise ValueError("change_only_scope must be 'portfolio' or 'asset'")
+    rebalance_frequency = payload.get("rebalance_frequency", "daily")
+    target_average = None
+    if payload.get("target_average") is not None:
+        average_payload = payload["target_average"]
+        if not isinstance(average_payload, dict):
+            raise ValueError("target_average must be an object")
+        unknown = set(average_payload) - {"periods", "frequency", "method"}
+        if unknown:
+            raise ValueError(f"Unknown target_average settings: {sorted(unknown)}")
+        if "periods" not in average_payload:
+            raise ValueError("target_average requires periods")
+        target_average = TargetAverageSpec(
+            periods=average_payload["periods"],
+            frequency=str(average_payload.get("frequency", "1d")).strip().lower(),
+            method=str(average_payload.get("method", "mean")).strip().lower(),
+        )
+        # The averaging schedule is the rebalance schedule; a different explicit
+        # rebalance_frequency would be ambiguous.
+        if ("rebalance_frequency" in payload
+                and str(payload["rebalance_frequency"]).strip().lower() != target_average.frequency):
+            raise ValueError("target_average.frequency and rebalance_frequency must match (or omit rebalance_frequency)")
+        rebalance_frequency = target_average.frequency
     return WeightSpec(
+        target_average=target_average,
         weighting=payload.get("weighting", "equal"),
         long_exposure=payload.get("long_exposure", 0.5),
         short_exposure=payload.get("short_exposure", 0.5),
@@ -381,6 +405,10 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
         short_exposure_feature=payload.get("short_exposure_feature"),
         long_exposure_lag=payload.get("long_exposure_lag", 0),
         short_exposure_lag=payload.get("short_exposure_lag", 0),
+        long_weight_feature=payload.get("long_weight_feature"),
+        short_weight_feature=payload.get("short_weight_feature"),
+        long_weight_lag=payload.get("long_weight_lag", 0),
+        short_weight_lag=payload.get("short_weight_lag", 0),
         long_filter=_load_weight_side_filter(payload.get("long_filter")),
         short_filter=_load_weight_side_filter(payload.get("short_filter")),
         gross_exposure=payload.get("gross_exposure", 1.0),
@@ -398,7 +426,7 @@ def load_weight_spec_from_payload(payload: dict) -> WeightSpec:
         rank_power=payload.get("rank_power", 1.0),
         max_positions=payload.get("max_positions"),
         universe_name=payload.get("universe_name"),
-        rebalance_frequency=payload.get("rebalance_frequency", "daily"),
+        rebalance_frequency=rebalance_frequency,
         feature_value_scale=payload.get("feature_value_scale", 1.0),
         feature_value_clip_min=payload.get("feature_value_clip_min", 0.0),
         feature_value_clip_max=payload.get("feature_value_clip_max", 1.0),

@@ -163,6 +163,41 @@ VectorBT는 엔진의 거래 기록과 아직 열린 거래의 평가손익을 �
 연산 순서를 유지하면서 배열로 계산한다. Freqtrade 연결부도 마크가격·목표비중을 시작 시
 배열로 정렬하여 조회하며, 주문·펀딩·증거금·청산·검산 순서를 유지한다.
 
+## 횡단면 피처 IC 분석 v2
+
+`scripts/research/analyze_cross_section_features_v2.py`는 v2 Feature Spec과 wide cache로 시각마다 종목 간
+피처 순위와 미래 수익률 순위의 상관(Spearman IC)을 계산하는 연구 도구다. 피처는 백테스트와 같은
+`build_feature_frames_from_cache`로 만든다. grid·백테스트·라이브 경로는 바꾸지 않는다.
+
+```powershell
+py scripts/research/analyze_cross_section_features_v2.py --source-cache-dir data/futures/binance/archive_universe/1h/cache_observed/wide `
+  --feature-spec-json <features.json> --universe-spec-json <universe.json> --forward-horizons 24,168 `
+  --label-start next_open --sample-hours 0 --bootstrap-reps 1999 --feature-chunk-size 4 --save-ic-series --out-dir <out>
+```
+
+| CLI 옵션 | 기본값과 의미 |
+|---|---|
+| `--forward-horizons` | `6,12,24,42`(봉 수). 1h 연구에서는 필요한 길이를 직접 지정한다. |
+| `--subsets` | `base,selected`. `none`은 가격이 있는 모든 종목, `base`·`selected`는 universe spec의 기본 적격·최종 선택 마스크. |
+| `--label-start` | `close`: `price[t+h]/price[t]-1`(기존). `next_open`: `open[t+1+h]/open[t+1]-1`로, t 종가 신호를 다음 봉 시가에 체결하는 백테스트 시점과 맞다. 시가 열은 `--open-column`(기본 `opening_price`). |
+| `--sample-every` / `--sample-hours` | `1` / 없음. IC를 계산할 행만 고른다. 피처·레이블은 모든 봉으로 계산한 뒤 고른다. `--sample-every N`은 첫 행부터 N봉마다, `--sample-hours 0`은 UTC 00시 봉만. 둘은 함께 쓰지 않는다. |
+| `--bootstrap-reps` | `0`(끔). 켜면 199 이상. 각 IC 시계열과 상하위 스프레드 시계열에 이동 블록 부트스트랩을 적용해 양측 p값과 IC 95% 구간을 낸다. |
+| `--block-bars` | `0` = 해당 레이블 길이(h). 블록 길이(봉)를 샘플 간격으로 나눠 올림한 행 수(`block_rows`)를 쓴다. 예: h=168, UTC 00시 샘플 → 7행. 데이터가 블록 두 개 미만이면 p값은 NaN. |
+| `--bootstrap-seed` | `0`. 가설별 시드는 이 값과 subset·horizon·피처 이름으로 정하므로 피처 순서·청크와 무관하게 재현된다. |
+| `--feature-chunk-size` | `0` = 기존처럼 모든 spec을 한 번에 계산. N이면 분석 피처 N개와 그 선언된 조상 spec만 묶어 계산한 뒤 샘플 행만 남기고 버린다. 결과는 같다. 공통 조상은 청크마다 다시 계산하므로 시간이 늘고, 최대 메모리는 조상이 가장 많은 청크가 정한다(그래프가 계산 중 조상 프레임을 모두 유지). universe 마스크는 universe spec이 참조하는 피처와 조상만 따로 계산한다. |
+| `--rank-autocorr-lag` | `1`(샘플 행). 피처 순위의 자기상관. 회전율 판단용이며, 매 봉 샘플에서는 1봉 간격이다. |
+| `--save-ic-series` | 끔. 켜면 `feature_ic_series.parquet`(timestamp, subset, horizon, feature, ic, q_spread)를 쓴다. |
+
+`feature_ic_summary.csv`의 기존 열(`n_ic`~`pearson_ic_mean`)은 의미가 같다. `spearman_ic_t`는 단순 평균/표준오차이므로
+겹치는 레이블과 매 봉 샘플에서는 유의성을 크게 부풀린다. 판단에는 다음 추가 열을 쓴다.
+
+- `spearman_ic_p_boot`, `spearman_ic_ci_low/high`: 블록 부트스트랩 결과.
+- `spearman_ic_q_by`: 결과 표의 모든 피처 × horizon × subset 행을 한 묶음으로 Benjamini-Yekutieli 보정한 값(`analyze_time_series_features_v2.by_adjust` 재사용).
+- `q_spread_mean`, `q_spread_p_boot`, `n_q_spread`: 시각마다 최상위 분위 평균 수익률 − 최하위 분위 평균 수익률의 평균과 p값. `feature_quantile_returns.csv`의 전체 풀링 평균과 다르다.
+- `rank_autocorr_mean`, `block_rows`.
+
+`summary.json`에는 레이블 시점, 샘플 설정과 샘플 행 수, 부트스트랩·FDR·청크 설정을 기록한다.
+
 ## 시계열 피처 예측력 분석 v2
 
 `scripts/research/analyze_time_series_features_v2.py`는 기존 wide cache와 v2 피처 계산을 재사용하는 **연속형 상관·회귀 분석기**다. 종목 간 순위를 비교하는 `analyze_cross_section_features_v2.py`와 달리, 각 종목의 시간 흐름에서 피처 수치와 미래 수익률의 관계 및 검증 기간 예측오차를 측정한다. 기존 grid/백테스트/라이브 실행 경로는 변경하지 않는다. 반복 사용을 위한 범용 도구이며 특정 전략용 임시 스크립트가 아니다.
@@ -476,6 +511,24 @@ py scripts/research/analyze_time_series_features_v2.py --source-cache-dir data/f
 | `quantize_weight` | `step_size`, `rounding`, `min_weight`, `max_weight` | 연속형 비중 배수를 일정한 단계로 변환 |
 | `rolling_beta` | `reference`, `window` | 기준 피처 대비 과거 `window`행의 롤링 베타. 완전한 유효 관측 구간 필요 |
 | `shift` | `periods` | row 기준 lag |
+| `age_days` | 없음 | 종목별 입력의 첫 유효값 시각부터 현재 행까지의 경과일(소수). 입력이 결측인 칸은 NaN |
+
+`age_days`는 상장 후 경과일 용도로 가격 source(`trade_price`)에 바로 적용한다. rolling 계열
+단계 뒤에 붙이면 기준점이 창 길이만큼 늦어진다. 기준점은 거래소 상장일이 아니라 캐시의 첫
+사용 가능 가격이다. 따라서 캐시 시작 이전에 상장한 종목은 캐시 시작일이 0일이고,
+`research_start_time_utc`가 있는 재개 계약은 재개 시점, 데이터 사용 시작이 늦춰진 종목은
+그 시작 시점이 0일이다. 라이브처럼 `tail_rows`로 최근 이력만 읽으면 읽은 구간 시작에서
+잘리므로, "N일 이내" 판정에는 N일보다 긴 이력이 필요하다. 신규 상장 마스크 예:
+
+```json
+[
+  {"source": "trade_price", "steps": [{"kind": "age_days", "params": {}}], "column_name": "listing_age_days"},
+  {"compare": {"left_feature": "listing_age_days", "operator": "le", "right_value": 30.0}, "column_name": "new30"}
+]
+```
+
+`new30`은 상장 전 NaN, 이후 0/1이며 `mask_by_feature`의 `feature`로 쓸 수 있다.
+"N일 이상"만 필요하면 유니버스 `min_age_days`도 같은 방식으로 경과일을 계산한다.
 
 `calendar_start_value`는 기간 시작 시각의 원래 행만 읽는다. 예를 들어 `opening_price`에
 `{"kind":"calendar_start_value","params":{"freq":"W-SUN"}}`를 적용하면 UTC 월요일
@@ -531,6 +584,21 @@ py scripts/research/analyze_time_series_features_v2.py --source-cache-dir data/f
   `partial_exit.reset_frequency`는 기존대로 `daily`, `weekly`, `monthly`만 지원한다.
   같은 주기 함수를 쓰는 `gross_exposure_update_frequency`와 `preselection.rebalance_frequency`에도
   사용할 수 있다. 체결 지연·`output_mode`와 거래 가능 마스크는 기존 규칙을 그대로 따른다.
+- `target_average`(분할 리밸런싱): `{"periods": N, "frequency": "1d", "method": "mean"}`. `frequency`
+  일정(위 `Nd`·`Nd+K`·`daily` 등과 같은 규칙, 기본 `1d`)마다 원래 방식으로 목표를 계산하고, 그 시점까지의
+  최근 N개 목표를 평균해 그 일정 행에 낸다. 사이 행은 `NaN`(보유 유지)이다. 이후 데이터는 쓰지 않는다.
+  - `method: "mean"`(기본)은 균등 평균이다. 데이터 시작 전 빈 기간은 첫 목표로 채운다(요일 sleeve가 첫 행에서
+    모두 진입하는 것과 같음). `"ewm"`은 첫 목표에서 시작해 일정마다 새 목표 쪽으로 `1/N`씩 옮긴다.
+  - 일정 행의 목표 칸이 `NaN`이면 그 종목의 직전 일정 목표를 쓴다. 거래 가능 마스크 밖 칸은 평균 뒤 기존처럼
+    모든 행에서 0이다.
+  - `rebalance_frequency`는 생략하거나 `frequency`와 같아야 한다. `weighting`은 `long_short_equal`·`equal`·
+    `fixed`만 지원하고, `change_only`(주기·`output_mode`), `hedge`, `portfolio_vol_target`, `defensive_sleeve`,
+    `gross_exposure_update_frequency`, `universe.holding`과 함께 쓰면 거부한다. 실행 이름에 `_tavg{method}{N}`이 붙는다.
+  - 같은 전략을 `7d`~`7d+6` 일곱 sleeve(자본 각 1/7)로 나눈 결합과 `mean`, `periods` 7, `frequency` `1d` 한 개는
+    요청이 있는 칸의 목표가 같다. 차이는 그날 리밸런싱하는 요일 sleeve가 아직 목표로 삼은 적 없는 종목을 sleeve 결합이
+    `NaN`(보유 유지)으로 두는 반면, 평균은 매 일정마다 모든 종목에 평균 목표를 낸다는 점이다. `strategy_sleeves`의
+    sleeve `weight_spec`에도 쓸 수 있다(예: 알트 sleeve에 `target_average`, BTC sleeve는 `change_only`).
+    예: `{"weighting": "long_short_equal", ..., "target_average": {"periods": 7, "frequency": "1d"}}`
 
 ### 상태별 피처 선택
 
@@ -799,6 +867,40 @@ Weight는 선택된 후보를 실제 목표 비중으로 바꾼다.
 - 배율은 `rebalance_frequency`에 따른 목표 출력 시점에 반영한다. `weekly`에서는 주간
   리밸런싱 때만 반영되고 사이 봉의 수량 유지(`NaN`)는 그대로다. 기존 공통 배율의 별도
   갱신 주기를 지정해도 방향 배율 자체에 새로운 갱신 주기가 생기지는 않는다.
+
+`long_weight_feature`, `short_weight_feature`를 지정하면 해당 방향 안의 배분만 종목별
+피처 배수로 바꾼다. 기본값은 둘 다 없음(동일가중)이며 `long_short_equal`에서만 지원한다.
+리밸런싱 행마다 그 방향에 최종 선정된 종목(cache 사용가능 마스크 적용 후)의 배수 `w`를
+`w / Σw`로 정규화해 `long_exposure`/`short_exposure`를 나눈다. 방향 총노출은 바뀌지 않고,
+그 뒤 방향 배율(`*_exposure_feature`)·공통 배율·`defensive_sleeve`를 기존 순서대로 적용한다.
+
+- 선정 종목의 배수가 결측·0·음수·무한값이면 시각과 종목을 담아 오류를 낸다. 제외하거나
+  중립값으로 채우지 않는다. 선정되지 않은 칸의 값은 사용하지 않는다. 배수 피처의 워밍업이
+  선정 조건 피처보다 길면 이 오류가 나므로 universe 최소 이력이나 순위 조건으로 맞춘다.
+- `long_weight_lag`, `short_weight_lag`는 기본 0인 음이 아닌 정수이며 배수 피처만 입력 봉 수만큼
+  지연한다. 필터 `lag`나 universe `signal_lag`를 자동으로 더하지 않는다. lag 초기 구간의
+  선정 종목은 결측이므로 오류다. 양수 lag에는 해당 방향 배수 피처가 필요하다.
+- 배수는 상대 크기만 의미가 있다. 상한·하한은 피처 쪽 `clip`·`target_vol_weight`로 만든다.
+- `target_average`에서는 일정마다 가중이 반영된 목표를 만든 뒤 평균한다. `change_only` 출력
+  (`rebalance_frequency: "change_only"` 또는 `output_mode: "change_only"`)과는 함께 쓸 수 없다.
+- 지정하지 않으면 기존 결과와 식별 이름을 유지한다.
+
+```json
+{
+  "feature_spec_template": [
+    {"source": "trade_price", "steps": [
+      {"kind": "simple_return", "params": {"window": 1}},
+      {"kind": "rolling_std", "params": {"window": 168}},
+      {"kind": "target_vol_weight", "params": {"target_annual_vol": 0.5, "periods_per_year": 8760,
+                                               "min_weight": 0.2, "max_weight": 1.0}}],
+     "column_name": "inv_vol7d"}
+  ],
+  "weight_spec_template": {
+    "weighting": "long_short_equal", "long_exposure": 0.5, "short_exposure": 0.5,
+    "short_weight_feature": "inv_vol7d"
+  }
+}
+```
 
 방향 입력은 다음 두 방식 중 하나다.
 
@@ -1260,7 +1362,7 @@ PBO·SPA(`scripts/research/analyze_pbo.py`, `analyze_spa.py`, 워크포워드 �
 }
 ```
 
-`periods_per_year`는 CAGR, Sharpe, Sortino, Calmar, Martin과 벤치마크
+`periods_per_year`는 CAGR, Sharpe, Sortino, Calmar, Martin, 변동성, 트래킹에러와 벤치마크
 성과지표에 공통으로 적용할 연간 bar 수다. 생략하면 일봉은 `252`, 분봉은
 `365 × 일중 bar 수`를 사용한다. 따라서 24시간 암호화폐 60분봉은
 `8760`으로 계산된다. 다른 거래일·거래시간 체계는 실제 연간 관측 수를
@@ -1286,6 +1388,44 @@ PBO·SPA(`scripts/research/analyze_pbo.py`, `analyze_spa.py`, 워크포워드 �
 | `init_cash` | 초기 계좌 자산. 기본 `1000000`; USDT 선물에서는 단위가 USDT다. |
 | `freqtrade` | 아래 선물 어댑터 설정. `engine="freqtrade"`일 때만 사용한다. |
 | `execution_availability` | 거래정지·상장폐지 체결 처리. 아래 절 참조. `engine="vectorbt"` 전용, 생략하면 꺼짐 |
+| `risk_free_rate` | Sharpe·Sortino·수정샤프·Jensen alpha의 무위험수익률. 아래 절 참조. 생략하면 0 |
+
+### 무위험수익률과 성과 지표 (`risk_free_rate`)
+
+```json
+"risk_free_rate": {"file": "data/macro/risk_free_rates_wide.csv", "column": "KR_CD91"}
+"risk_free_rate": {"annual_pct": 3.0}
+```
+
+- 파일은 날짜별 연 % 금리 CSV다. 각 bar는 직전 bar 시각까지 알려진 금리를 쓰고(첫 bar는 자기 시각 기준),
+  연 금리 `r`을 `(1 + r/100)^(1/periods_per_year) − 1`로 bar 수익률로 바꾼다. 금리가 첫 bar보다 늦게
+  시작하면 오류다. 마지막 관측일 이후 bar는 마지막 값을 쓰며, 그 날짜를 `Risk-Free Rate Last Observation`에 기록한다.
+- 적용 지표: `Sharpe Ratio`, `Sortino Ratio`(하방편차도 초과수익 기준), `Modified Sharpe Ratio`, 벤치마크의
+  같은 지표, `Annualized Jensen Alpha [%]`(전략·벤치마크 초과수익으로 CAPM 회귀). 정보비율·트래킹에러·
+  `Annualized Excess Return [%]`(전략 − 벤치마크)·CAGR·Calmar·Martin·`CVaR 5% Sharpe`는 무위험수익률과 무관하게 계산한다.
+- 같은 키를 그리드(`vectorbt_spec`), walk-forward(창별·이어붙인 요약), TPE(`backtest.risk_free_rate`, Sharpe·Sortino 목적함수)가 읽는다.
+  단일 백테스트는 `--risk-free-rate-json`으로 준다. PBO·SPA의 자체 Sharpe 계산에는 적용하지 않는다.
+- 결과 열 `Risk-Free Rate Source`, `Risk-Free Rate Mean [%]`(bar 평균 연율)에 사용한 금리를 남긴다.
+
+금리 파일 갱신(기존 다운로드 스크립트, ECOS는 `.env`의 `ECOS_API_KEY` 필요):
+
+```powershell
+py scripts/download_stock_prices.py --fred-series DTB3 --ecos-series 817Y002/D/010502000=KR_CD91 `
+  --start 2000-01-01 --out-csv data/macro/risk_free_rates_wide.csv
+```
+
+`DTB3`는 FRED 미국 3개월 국채(일별), `KR_CD91`은 한국은행 ECOS CD(91일) 일별 금리다.
+
+함께 출력하는 지표(무위험수익률 설정과 무관한 값은 기존과 같다):
+
+| 열 | 정의 |
+|---|---|
+| `Annualized Volatility [%]`, `Benchmark Annualized Volatility [%]` | bar 수익률 모표준편차 × √`periods_per_year` |
+| `Tracking Error [%]` | (전략 − 벤치마크) bar 수익률 모표준편차 × √`periods_per_year` |
+| `Modified Sharpe Ratio`, `Benchmark Modified Sharpe Ratio` | Israelsen 방식. ER = 연환산 평균 초과수익, σ = 연환산 초과수익 표준편차일 때 ER ≥ 0이면 ER/σ, ER < 0이면 ER×σ |
+| `Recent 3M/6M/3Y/5Y …` | 마지막 bar에서 거슬러 올라간 기간의 누적 수익률·벤치마크 수익률·IR·AIR·MDD. 3Y·5Y는 `CAGR [%]`과 `Benchmark CAGR [%]`도 낸다 |
+
+`Recent 3M/6M/3Y/5Y`는 기간을 채워야 값을 낸다. 곡선 시작이 기간 시작보다 곡선의 최대 bar 간격(주말·휴장)을 넘게 늦으면 빈 값이다. 기존 `Recent 1Y/2Y`는 기간이 짧아도 있는 구간으로 계산하는 기존 동작을 유지한다.
 
 ### 거래정지·상장폐지 체결 처리 (`execution_availability`)
 
@@ -2180,6 +2320,9 @@ py scripts/binance_futures_collector_v2.py --source archive --all-symbols --asse
 관측값·읽기 오류·잘못된 숫자 등의 검증은 보존하고 `tradable=false`와 전 기간의
 `unresolved_lifecycle` 표시를 유지한다. 기본값은 계속 차단이며, 위 넘바 전용 연구 옵션으로만
 관측 구간 사용을 허용한다. 경고 감소가 공식 거래 가능 판정으로 바뀌는 것은 아니다.
+누락 표시가 없어도 첫 관측 봉과 마지막 관측 봉 사이의 공백에는 공식 일별 ZIP 보충을 적용한다.
+저장된 `candle_repairs.json` 보충은 체크포인트를 원본에서 다시 읽을 때도 오프라인으로 재사용한다.
+REST 보충과 관측 구간 밖 날짜 요청은 하지 않는다. 적용된 보충이 없으면 체크포인트를 다시 쓰지 않는다.
 구 버전 체크포인트는 원본 ZIP을 다시 읽지 않고 manifest만 원자적으로 갱신할 수 있으며,
 이 경우 기존 Parquet 바이트와 복구값을 그대로 보존한다.
 
@@ -2754,6 +2897,19 @@ py scripts/kr_stocks/build_kr_stock_source_cache.py --include-industry --industr
 이미 있는 열 이름이면 오류로 중단한다. 이 스크립트는 캐시의 모든 원천 파일을 다시 쓰므로, 원천이 갱신된 상태에서
 재생성하면 다른 피처도 바뀔 수 있다. 피처를 유지하려면 임시 `--out-dir`에 만든 뒤 기존 캐시와 비교하고 필요한 파일만 반영한다.
 
+`--close-source`는 `trade_price`와 시가총액·거래대금·거래량·시장 구분의 원천을 고른다(기본 `fdr`).
+
+| 값 | `trade_price` | 시가총액·거래대금·거래량·시장 |
+|---|---|---|
+| `fdr` | `close_fdr.parquet`(FinanceDataReader→네이버 수정주가) | `marcap_daily.parquet` |
+| `krx` | `close_krx_adj.parquet`(KRX 정규장 종가, KRX 기준가 수정계수) | `krx_price_daily.parquet` |
+
+`krx` 원천은 `build_kr_stock_raw_cache.py --include-krx-price`로 만든다. 최초 실행은 `--start`부터 연 단위로 받아
+`krx_price_daily.parquet.partial`에 저장하고, 중단 후 같은 `--start`·`--markets`로 다시 실행하면 이어서 받는다.
+이후 `--update`는 `--krx-price-overlap-days`(기본 10일)를 다시 받고 `marcap_daily` 종가 불일치·누락 거래일이 있으면 아무것도 쓰지 않고 중단한다.
+당일 행은 KST `--krx-final-time`(기본 20:30) 이후에만 저장한다. 수정계수는 `기준가(종가 − 대비) ÷ 전일 종가`이며 거래정지 후 재상장일은 KRX 시초가 경매 기준가를 쓰므로 그날 가격 차이는 수익률에 들어가지 않는다. 현금배당은 수정하지 않는다. 이벤트 목록은 `krx_adjust_events.json`에 남는다.
+`krx`는 상장폐지 종목을 포함하지만, 재무 캐시와 `common_share_flag`는 재무 원천을 수집한 종목에만 값이 있다(DATA-019).
+
 ## Grid 작성 규칙
 
 `grid`에는 단순값만 넣는 것이 안전하다.
@@ -3124,6 +3280,7 @@ BTC 헤지를 더한 후속 대상은 586종목이었다. 48개 후보가 하나
 - `rank_weights`는 `w1`, `w2`, `w3`처럼 나눠서 넣고 `constraints`로 묶는다.
 - 일별 필터를 월별 전략에 붙이면 거래가 과도하게 늘 수 있다. 월별 전략에는 `calendar_mean(freq="M", signal_timing="next_period")` 같은 고정화가 필요한지 먼저 검토한다.
 - 최종 후보는 `summary_results.csv`뿐 아니라 실제 `weights.csv`나 artifacts로 선택 종목과 거래 빈도를 확인한다.
+- 국내 주식(`kr_stock_daily*` 캐시) config는 `vectorbt_spec_template.execution_availability`(`{"volume_column": "candle_acc_trade_volume"}`)를 넣는다. 상장폐지 종목이 포함된 캐시에서 빠지면 거래정지 가격으로 체결되거나 폐지 보유분 손익이 NaN이 되어 중단된다(DATA-001, DATA-019).
 
 ## Public release manifest v2
 
