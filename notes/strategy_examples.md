@@ -202,18 +202,18 @@ SPA p값은 0.05를 넘어 SPY 대비 초과성과의 통계적 유의성은 확
 <table width="100%">
   <tr>
     <td width="50%" rowspan="8" valign="top"><a href="assets/alt_ls9_72_top5_index.png"><img src="assets/alt_ls9_72_top5_index.png" alt="상위 5개 롱숏 조합과 BTC 보유 성과·낙폭" width="100%"></a></td>
-    <th width="18%" align="left">순위 · 롱 그룹</th><th width="8%" align="right">CAGR</th><th width="8%" align="right">MDD</th><th width="8%" align="right">변동성</th><th width="8%" align="right">Sharpe</th><th width="8%" align="right">IR</th>
+    <th width="18%" align="left">순위 · 롱 그룹</th><th width="8%" align="right">CAGR</th><th width="8%" align="right">MDD</th><th width="8%" align="right">변동성</th><th width="8%" align="right">Sharpe</th><th width="8%" align="right">IR(현금)</th><th width="8%" align="right">BTC 베타</th>
   </tr>
-  <tr><td align="left" valign="top">1 · 하위 / 하위</td><td align="right" valign="top"><strong>40.88%</strong></td><td align="right" valign="top">-35.05%</td><td align="right" valign="top">29.23%</td><td align="right" valign="top">1.22</td><td align="right" valign="top">-0.22</td></tr>
-  <tr><td align="left" valign="top">2 · 하위 / 중간</td><td align="right" valign="top">28.14%</td><td align="right" valign="top">-29.19%</td><td align="right" valign="top">25.13%</td><td align="right" valign="top">1.00</td><td align="right" valign="top">-0.38</td></tr>
-  <tr><td align="left" valign="top">3 · 상위 / 상위</td><td align="right" valign="top">27.44%</td><td align="right" valign="top">-41.91%</td><td align="right" valign="top">28.39%</td><td align="right" valign="top">0.90</td><td align="right" valign="top">-0.38</td></tr>
-  <tr><td align="left" valign="top">4 · 중간 / 상위</td><td align="right" valign="top">25.00%</td><td align="right" valign="top">-42.57%</td><td align="right" valign="top">28.94%</td><td align="right" valign="top">0.82</td><td align="right" valign="top">-0.40</td></tr>
-  <tr><td align="left" valign="top">5 · 중간 / 하위</td><td align="right" valign="top">20.74%</td><td align="right" valign="top">-44.99%</td><td align="right" valign="top">27.05%</td><td align="right" valign="top">0.73</td><td align="right" valign="top">-0.46</td></tr>
-  <tr><td align="left" valign="top">비교 · BTC 보유</td><td align="right" valign="top">42.55%</td><td align="right" valign="top">-77.24%</td><td align="right" valign="top">60.71%</td><td align="right" valign="top">0.84</td><td align="right" valign="top">—</td></tr>
-  <tr><td colspan="6" align="left"><strong>1~5위 숏 그룹: 거래대금 상위 / 수익률 하위</strong></td></tr>
+  <tr><td align="left" valign="top">1 · 하위 / 하위</td><td align="right" valign="top"><strong>40.88%</strong></td><td align="right" valign="top">-35.05%</td><td align="right" valign="top">29.23%</td><td align="right" valign="top">1.22</td><td align="right" valign="top">1.22</td><td align="right" valign="top">-0.04</td></tr>
+  <tr><td align="left" valign="top">2 · 하위 / 중간</td><td align="right" valign="top">28.14%</td><td align="right" valign="top">-29.19%</td><td align="right" valign="top">25.13%</td><td align="right" valign="top">1.00</td><td align="right" valign="top">1.00</td><td align="right" valign="top">-0.04</td></tr>
+  <tr><td align="left" valign="top">3 · 상위 / 상위</td><td align="right" valign="top">27.44%</td><td align="right" valign="top">-41.91%</td><td align="right" valign="top">28.39%</td><td align="right" valign="top">0.90</td><td align="right" valign="top">0.90</td><td align="right" valign="top">-0.02</td></tr>
+  <tr><td align="left" valign="top">4 · 중간 / 상위</td><td align="right" valign="top">25.00%</td><td align="right" valign="top">-42.57%</td><td align="right" valign="top">28.94%</td><td align="right" valign="top">0.82</td><td align="right" valign="top">0.82</td><td align="right" valign="top">-0.04</td></tr>
+  <tr><td align="left" valign="top">5 · 중간 / 하위</td><td align="right" valign="top">20.74%</td><td align="right" valign="top">-44.99%</td><td align="right" valign="top">27.05%</td><td align="right" valign="top">0.73</td><td align="right" valign="top">0.73</td><td align="right" valign="top">-0.02</td></tr>
+  <tr><td align="left" valign="top">비교 · BTC 보유</td><td align="right" valign="top">42.55%</td><td align="right" valign="top">-77.24%</td><td align="right" valign="top">60.71%</td><td align="right" valign="top">0.84</td><td align="right" valign="top">—</td><td align="right" valign="top">—</td></tr>
+  <tr><td colspan="7" align="left"><strong>1~5위 숏 그룹: 거래대금 상위 / 수익률 하위</strong></td></tr>
 </table>
 
-**IR 해석:** IR은 BTC 보유 대비 연환산 값이다. 롱·숏이 시장 방향을 상쇄하는 시장중립형 구조라 BTC를 따라가는 전략이 아니므로 참고용이다.
+**벤치마크:** 롱·숏이 시장 방향을 상쇄하는 구조라 기준은 현금(미국 3개월 국채, FRED DTB3)이다. 현금 대비 IR은 무위험수익률을 뺀 Sharpe와 같은 정의이므로 두 열의 값이 같다. BTC 보유는 같은 기간 시장 비교용이며, BTC 베타는 1시간 수익률 기준 전략 수익률의 BTC 수익률에 대한 회귀계수다.
 
 ### 4.3 조합 평가 · 주요 특성
 
