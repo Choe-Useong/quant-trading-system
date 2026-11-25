@@ -36,7 +36,7 @@
 
 | 문서 | 설명 |
 | --- | --- |
-| [시스템 사용·운영 방식](notes/system_operations.md) | 요청에서 결과까지의 흐름, 운영 절차, 알림, 예외 상황별 동작, 개발·품질 관리 규칙 |
+| [시스템 사용·운영 방식](notes/system_operations.md) | 백테스트 작업 흐름, 운영 절차, 알림, 예외 상황별 동작, 개발·품질 관리 규칙 |
 | [기능 목록](notes/feature_inventory.md) | 구현된 연구·검증·라이브 기능 |
 | [설정 파일 레퍼런스](notes/config_reference_v2.md) | 전략 설정 옵션 |
 | [4개 전략 요약](notes/strategy_summary.md) | 4개 전략의 신호·비중·성과·검증 결과를 한눈에 비교 |
