@@ -264,20 +264,39 @@ def _execute_command(*, plan_path: Path, state_json: Path, report_path: Path, ar
     return command
 
 
+MAX_CLOSED_UNFILLED_REPLANS = 3
+
+
+def _execution_order_date(execution_path: Path) -> str:
+    """Order date from the execution report name (<YYYYMMDD>_<HHMMSS>_<phase>_execution.json)."""
+    prefix = execution_path.name[:8]
+    try:
+        datetime.strptime(prefix, "%Y%m%d")
+    except ValueError:
+        return ""
+    return prefix
+
+
 def _fill_command(*, execution_path: Path, output_path: Path, args: argparse.Namespace) -> list[str]:
-    return _py_command(
+    # Query all order rows (not filled-only) so ended orders with unfilled quantity are
+    # visible, and start at the order date so the order stays in the window on later days.
+    command = _py_command(
         "kr_stock_live/trading/check_fills.py",
         "--execution-json",
         str(execution_path),
         "--fill-filter",
-        "01",
-        "--lookback-days",
-        str(args.fill_lookback_days),
+        "00",
         "--sleep-seconds",
         str(args.sleep_seconds),
         "--output-json",
         str(output_path),
     )
+    order_date = _execution_order_date(execution_path)
+    if order_date:
+        command.extend(["--start-date", order_date, "--end-date", datetime.now().strftime("%Y%m%d")])
+    else:
+        command.extend(["--lookback-days", str(args.fill_lookback_days)])
+    return command
 
 
 def _nonzero_plan_orders(plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -383,6 +402,38 @@ def _handle_pending(
     fills_path = _check_fills(phase, execution_path=execution_path, run_dir=run_dir, args=args)
     fills = read_json(fills_path)
     auto_state[f"{phase}_fills"] = _rel(fills_path)
+    if (
+        not fills.get("all_submitted_orders_fully_filled")
+        and fills.get("all_submitted_orders_closed")
+        and not fills.get("weak_match_used")
+    ):
+        # Every submitted order has ended (day end, cancel or reject) and quantity is left.
+        # Nothing is working, so a new plan from current holdings and cash cannot duplicate it.
+        replans = int(auto_state.get(f"{phase}_closed_unfilled_replans") or 0) + 1
+        if replans > MAX_CLOSED_UNFILLED_REPLANS:
+            auto_state["reason"] = f"{phase}_orders_closed_unfilled_replan_limit"
+            _write_auto_state(auto_state_path, auto_state)
+            raise RuntimeError(
+                f"{phase} orders ended unfilled after {MAX_CLOSED_UNFILLED_REPLANS} replans; "
+                "pending order state was preserved for manual review"
+            )
+        auto_state[f"{phase}_closed_unfilled_replans"] = replans
+        auto_state["phase"] = "idle"
+        auto_state["reason"] = f"{phase}_orders_closed_unfilled_replan"
+        _write_auto_state(auto_state_path, auto_state)
+        _write_report(
+            run_dir,
+            {
+                "action": "replan",
+                "phase": phase,
+                "reason": auto_state["reason"],
+                "fills": _rel(fills_path),
+                "closed_unfilled_count": fills.get("closed_unfilled_count"),
+                "replan_count": replans,
+            },
+        )
+        return "replan"
+
     if not fills.get("all_submitted_orders_fully_filled") or fills.get("weak_match_used"):
         auto_state["reason"] = f"{phase}_orders_not_confirmed_filled"
         _write_auto_state(auto_state_path, auto_state)
@@ -397,6 +448,7 @@ def _handle_pending(
         return "stop"
 
     if phase == "sell":
+        auto_state.pop("sell_closed_unfilled_replans", None)
         auto_state["phase"] = "idle"
         auto_state["reason"] = "sell_filled"
         _write_auto_state(auto_state_path, auto_state)
@@ -410,6 +462,8 @@ def _handle_pending(
             return "stop"
         buy_plan = _resolve_path(str(auto_state.get("buy_plan") or ""))
         _mark_done(plan_path=buy_plan, state_json=state_json)
+        auto_state.pop("sell_closed_unfilled_replans", None)
+        auto_state.pop("buy_closed_unfilled_replans", None)
         auto_state["phase"] = "done"
         auto_state["reason"] = "buy_filled_marked_executed"
         _write_auto_state(auto_state_path, auto_state)
@@ -568,32 +622,34 @@ def main() -> int:
         )
         if pending_result == "stop":
             return 0
-        _update_cache(profile_json, skip=args.skip_cache_update)
-        stopped = _run_new_phase(
-            phase="buy",
-            profile_json=profile_json,
-            state_json=state_json,
-            auto_state=auto_state,
-            auto_state_path=auto_state_path,
-            run_dir=run_dir,
-            args=args,
-        )
-        if not stopped:
-            auto_state["phase"] = "idle"
-            auto_state["reason"] = "sell_filled_no_buy_orders"
-            _write_auto_state(auto_state_path, auto_state)
-            _write_report(run_dir, {"action": "noop", "phase": "buy", "reason": auto_state["reason"]})
-        else:
-            _maybe_continue_buy_after_submission(
+        if pending_result == "continue_buy":
+            _update_cache(profile_json, skip=args.skip_cache_update)
+            stopped = _run_new_phase(
+                phase="buy",
+                profile_json=profile_json,
+                state_json=state_json,
                 auto_state=auto_state,
                 auto_state_path=auto_state_path,
                 run_dir=run_dir,
-                state_json=state_json,
                 args=args,
             )
-        return 0
-    if args.execute and phase == "buy_submitted":
-        _handle_pending_with_retries(
+            if not stopped:
+                auto_state["phase"] = "idle"
+                auto_state["reason"] = "sell_filled_no_buy_orders"
+                _write_auto_state(auto_state_path, auto_state)
+                _write_report(run_dir, {"action": "noop", "phase": "buy", "reason": auto_state["reason"]})
+            else:
+                _maybe_continue_buy_after_submission(
+                    auto_state=auto_state,
+                    auto_state_path=auto_state_path,
+                    run_dir=run_dir,
+                    state_json=state_json,
+                    args=args,
+                )
+            return 0
+        # "replan": the sell orders ended unfilled; plan again from current holdings below.
+    elif args.execute and phase == "buy_submitted":
+        pending_result = _handle_pending_with_retries(
             phase="buy",
             auto_state=auto_state,
             auto_state_path=auto_state_path,
@@ -602,7 +658,9 @@ def main() -> int:
             args=args,
             wait_before_first=False,
         )
-        return 0
+        if pending_result != "replan":
+            return 0
+        # "replan": the buy orders ended unfilled; plan again from current holdings below.
 
     _update_cache(profile_json, skip=args.skip_cache_update)
     stopped = _run_new_phase(
@@ -625,7 +683,9 @@ def main() -> int:
                 args=args,
                 wait_before_first=True,
             )
-            if pending_result == "stop":
+            if pending_result != "continue_buy":
+                # "replan" here means the just-submitted sells ended unfilled; the state is
+                # idle and the next scheduled run plans again instead of looping in this run.
                 return 0
             _update_cache(profile_json, skip=args.skip_cache_update)
             stopped = _run_new_phase(
@@ -672,6 +732,9 @@ def main() -> int:
         )
         return 0
     if not stopped:
+        # Holdings already match the target, so earlier unfilled-order replans are settled.
+        auto_state.pop("sell_closed_unfilled_replans", None)
+        auto_state.pop("buy_closed_unfilled_replans", None)
         auto_state["phase"] = "idle"
         auto_state["reason"] = "no_sell_or_buy_orders"
         _write_auto_state(auto_state_path, auto_state)

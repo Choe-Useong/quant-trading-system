@@ -129,15 +129,60 @@ def _rows_for_order(rows: list[dict[str, Any]], order: dict[str, Any]) -> tuple[
     order_no = str(order.get("order_no") or "").strip()
     symbol = str(order.get("symbol") or "").upper().strip()
     if order_no:
-        matched = [row for row in rows if order_no in _order_no_candidates(row)]
-        if matched:
-            return matched, False
+        # An order number identifies the order. Falling back to the symbol would count
+        # other orders of the same symbol in the query window as this order's fills.
+        exact = [row for row in rows if str(row.get("odno") or row.get("ODNO") or "").strip() == order_no]
+        if exact:
+            return exact, False
+        return [row for row in rows if order_no in _order_no_candidates(row)], False
     if symbol:
         return [row for row in rows if symbol in _symbol_candidates(row)], True
     return [], True
 
 
-def _summarize_order_fill(rows: list[dict[str, Any]], order: dict[str, Any], *, fill_filter: str) -> dict[str, Any]:
+CANCELLED_QTY_KEYS = ["cncl_cfrm_qty", "CNCL_CFRM_QTY"]
+REJECTED_QTY_KEYS = ["rjct_qty", "RJCT_QTY"]
+
+
+def _order_state(
+    matched_rows: list[dict[str, Any]],
+    *,
+    expected_qty: int,
+    filled_qty: float | None,
+    open_qty: float | None,
+    today: str,
+) -> str:
+    """filled, closed_unfilled, open or not_found for one domestic order.
+
+    Regular-session domestic orders are day orders, so an order dated before today has
+    ended at the exchange. On the order date, an order counts as ended only when nothing
+    remains and a cancel/reject quantity is reported.
+    """
+    if not matched_rows:
+        return "not_found"
+    if filled_qty is not None and filled_qty >= expected_qty > 0:
+        return "filled"
+    if filled_qty is None:
+        return "open"
+    order_dates = {str(row.get("ord_dt") or row.get("ORD_DT") or "").strip() for row in matched_rows}
+    if order_dates and "" not in order_dates and max(order_dates) < today:
+        return "closed_unfilled"
+    cancel_or_reject = sum(
+        (_first_number(row, CANCELLED_QTY_KEYS) or 0.0) + (_first_number(row, REJECTED_QTY_KEYS) or 0.0)
+        for row in matched_rows
+    )
+    if open_qty is not None and open_qty <= 0 and cancel_or_reject > 0:
+        return "closed_unfilled"
+    return "open"
+
+
+def _summarize_order_fill(
+    rows: list[dict[str, Any]],
+    order: dict[str, Any],
+    *,
+    fill_filter: str,
+    today: str | None = None,
+) -> dict[str, Any]:
     matched_rows, weak_match = _rows_for_order(rows, order)
     expected_qty = _order_qty(order)
     filled_values = [
@@ -172,6 +217,14 @@ def _summarize_order_fill(rows: list[dict[str, Any]], order: dict[str, Any], *, 
         "qty_known": qty_known,
         "weak_symbol_match": weak_match,
         "fully_filled": fully_filled,
+        "order_state": _order_state(
+            matched_rows,
+            expected_qty=expected_qty,
+            filled_qty=filled_qty,
+            open_qty=open_qty,
+            today=today or _today_yyyymmdd(),
+        ),
+        "order_dates": sorted({str(row.get("ord_dt") or row.get("ORD_DT") or "").strip() for row in matched_rows}),
     }
 
 
@@ -213,7 +266,13 @@ def main() -> int:
     order_fill_status = [_summarize_order_fill(rows, order, fill_filter=args.fill_filter) for order in submitted]
     fully_filled_count = sum(1 for item in order_fill_status if item["fully_filled"])
     weak_match_used = any(item["weak_symbol_match"] for item in order_fill_status)
-    matched_rows = [row for order in submitted for row in _rows_for_order(rows, order)[0]]
+    closed_unfilled_count = sum(1 for item in order_fill_status if item["order_state"] == "closed_unfilled")
+    all_closed = (
+        bool(submitted)
+        and not weak_match_used
+        and all(item["order_state"] in {"filled", "closed_unfilled"} for item in order_fill_status)
+    )
+    matched_rows =[row for order in submitted for row in _rows_for_order(rows, order)[0]]
     report = {
         "type": "kr_stock_live_fill_report_v1",
         "fill_report_id": f"fills_{short_hash({'start': start_date, 'end': end_date, 'rows': matched_rows})}",
@@ -230,6 +289,8 @@ def main() -> int:
         "fully_filled_count": fully_filled_count,
         "all_submitted_orders_fully_filled": bool(submitted) and fully_filled_count == len(submitted),
         "weak_match_used": weak_match_used,
+        "closed_unfilled_count": closed_unfilled_count,
+        "all_submitted_orders_closed": all_closed,
         "order_fill_status": order_fill_status,
         "matched_rows": matched_rows,
     }

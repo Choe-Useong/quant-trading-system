@@ -18,6 +18,7 @@ from lib.specs import FeatureSpec
 
 SUPPORTED_SOURCE_COLUMNS = {
     "trade_price",
+    "total_return_price",
     "signal_price",
     "index_price",
     "opening_price",

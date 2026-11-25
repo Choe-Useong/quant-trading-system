@@ -54,6 +54,24 @@ def _history_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop rows repeated across exchange queries.
+
+    KIS inquire-ccnl with OVRS_EXCG_CD=NASD also returns orders on other US exchanges,
+    so an AMEX order comes back from both the NASD and AMEX queries. Only identical
+    rows are dropped; distinct rows for the same order are kept.
+    """
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
 def _order_no_candidates(row: dict[str, Any]) -> set[str]:
     return {
         str(row.get(key) or "").strip()
@@ -304,6 +322,8 @@ def main() -> int:
         next_rows = _history_rows(payload)
         rows.extend(next_rows)
         query_results.append({"exchange_code": exchange_code, "row_count": len(next_rows)})
+    query_row_count = len(rows)
+    rows = _dedupe_rows(rows)
     matched = _match_rows(rows, execution)
     submitted = _submitted_orders(execution)
     order_fill_status = [
@@ -330,6 +350,7 @@ def main() -> int:
         "symbol": args.symbol,
         "fill_filter": args.fill_filter,
         "row_count": len(rows),
+        "duplicate_row_count": query_row_count - len(rows),
         "matched_count": len(matched),
         "submitted_order_count": len(submitted),
         "matched_submitted_count": sum(1 for item in order_fill_status if item["matched_rows"] > 0),

@@ -41,6 +41,9 @@ PYKRX_OUTPUT_COLUMNS = [
     "NAV",
     "IndexValue",
 ]
+# Yahoo cash distributions per share (KRW) by Yahoo's ex-date, long format.
+DISTRIBUTION_FILE = "distributions_yahoo.parquet"
+DISTRIBUTION_COLUMNS = ["Date", "Symbol", "Amount"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,6 +87,14 @@ def parse_args() -> argparse.Namespace:
         "--status",
         action="store_true",
         help="Print the latest saved progress status and exit.",
+    )
+    parser.add_argument(
+        "--distributions-only",
+        action="store_true",
+        help=(
+            "Fetch only Yahoo cash distributions from --start to --end into "
+            f"{DISTRIBUTION_FILE} (replacing that window per fetched symbol); price files are not touched."
+        ),
     )
     return parser.parse_args()
 
@@ -278,6 +289,46 @@ def _read_existing_signal(path: Path) -> pd.DataFrame:
     frame = frame[~frame.index.duplicated(keep="last")].sort_index()
     frame = frame.loc[:, ~pd.Index(frame.columns).duplicated()]
     return frame.sort_index(axis=1)
+
+
+def _read_existing_distributions(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=DISTRIBUTION_COLUMNS)
+    return _normalize_distributions(pd.read_parquet(path))
+
+
+def _normalize_distributions(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(
+            {"Date": pd.Series(dtype="datetime64[ns]"), "Symbol": pd.Series(dtype=str),
+             "Amount": pd.Series(dtype="float64")}
+        )
+    out = frame.loc[:, DISTRIBUTION_COLUMNS].copy()
+    out["Date"] = pd.to_datetime(out["Date"]).dt.normalize()
+    out["Symbol"] = out["Symbol"].map(_normalize_symbol)
+    out["Amount"] = pd.to_numeric(out["Amount"], errors="coerce").astype("float64")
+    out = out.drop_duplicates(subset=["Date", "Symbol"], keep="last")
+    return out.sort_values(["Symbol", "Date"]).reset_index(drop=True)
+
+
+def _merge_distributions(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+    *,
+    fetched_symbols: set[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Replace each fetched symbol's events inside [start, end] with the fetched ones.
+
+    A symbol whose request failed or returned nothing keeps its stored events.
+    """
+    existing = _normalize_distributions(existing)
+    replaced = existing["Symbol"].isin(fetched_symbols) & existing["Date"].between(start, end)
+    parts = [frame for frame in (existing.loc[~replaced], incoming) if not frame.empty]
+    if not parts:
+        return _normalize_distributions(pd.DataFrame(columns=DISTRIBUTION_COLUMNS))
+    return _normalize_distributions(pd.concat(parts, ignore_index=True))
 
 
 def _progress_path(out_dir: Path) -> Path:
@@ -612,6 +663,110 @@ def _extract_adj_close(data: pd.DataFrame, yahoo_tickers: list[str]) -> pd.DataF
     return frame.sort_index().sort_index(axis=1)
 
 
+def _yahoo_field(data: pd.DataFrame, field: str) -> pd.Series:
+    """One field of a single-ticker yf.download response as a Series."""
+    if isinstance(data.columns, pd.MultiIndex):
+        if field not in data.columns.get_level_values(0):
+            raise ValueError(f"Yahoo response missing {field} field")
+        values = data[field]
+        if isinstance(values, pd.DataFrame):
+            if values.shape[1] != 1:
+                raise ValueError(f"Unexpected multi-ticker Yahoo {field} field")
+            values = values.iloc[:, 0]
+    else:
+        if field not in data.columns:
+            raise ValueError(f"Yahoo response missing {field} field")
+        values = data[field]
+    values = pd.to_numeric(values, errors="coerce")
+    values.index = pd.to_datetime(values.index).normalize()
+    return values
+
+
+def _split_yahoo_actions(data: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Price rows (as before actions were requested) and positive cash distributions.
+
+    With actions=True Yahoo adds a row on a distribution date that has no price row; those rows are
+    dropped from the price part so the signal cache keeps the same rows as an actions=False request.
+    """
+    if data.empty or "Dividends" not in data.columns.get_level_values(0):
+        return data, _normalize_distributions(pd.DataFrame(columns=DISTRIBUTION_COLUMNS))
+    dividends = _yahoo_field(data, "Dividends")
+    adj_close = _yahoo_field(data, "Adj Close")
+    action_only = (adj_close.isna() & dividends.fillna(0.0).gt(0.0)).to_numpy()
+    paid = dividends[dividends.gt(0.0)]
+    events = pd.DataFrame({"Date": paid.index, "Symbol": symbol, "Amount": paid.to_numpy(dtype="float64")})
+    return data.loc[~action_only], _normalize_distributions(events)
+
+
+def _download_yahoo_history(yf, symbol: str, *, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    return yf.download(
+        tickers=f"{symbol}.KS",
+        start=start.strftime("%Y-%m-%d"),
+        end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        interval="1d",
+        auto_adjust=False,
+        actions=True,
+        progress=False,
+        threads=False,
+        group_by="column",
+    )
+
+
+def _download_yahoo_distributions(
+    symbols: list[str],
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    batch_size: int,
+    existing: pd.DataFrame,
+    output_path: Path,
+) -> tuple[pd.DataFrame, list[str], list[str], list[dict[str, object]]]:
+    """Distributions only: same per-symbol Yahoo request as the signal download, checkpointed per batch.
+
+    Also returns nonzero Yahoo "Capital Gains" / "Stock Splits" rows, which are not distributions
+    here and are reported for review.
+    """
+    yf = _load_yfinance()
+    merged = _normalize_distributions(existing)
+    failed: list[str] = []
+    no_data: list[str] = []
+    other_actions: list[dict[str, object]] = []
+    started_at = time.monotonic()
+    done = 0
+    for batch in _split_batches(symbols, batch_size):
+        fetched: set[str] = set()
+        parts: list[pd.DataFrame] = []
+        for symbol in batch:
+            try:
+                data = _download_yahoo_history(yf, symbol, start=start, end=end)
+                if data.empty:
+                    no_data.append(symbol)
+                    continue
+                _, events = _split_yahoo_actions(data, symbol)
+                for field in ("Capital Gains", "Stock Splits"):
+                    if field in data.columns.get_level_values(0):
+                        values = _yahoo_field(data, field)
+                        for date, value in values[values.fillna(0.0).ne(0.0)].items():
+                            other_actions.append({"symbol": symbol, "date": date.date().isoformat(),
+                                                  "field": field, "value": float(value)})
+            except Exception:
+                failed.append(symbol)
+                continue
+            fetched.add(symbol)
+            parts.append(events)
+        incoming = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=DISTRIBUTION_COLUMNS)
+        merged = _merge_distributions(merged, incoming, fetched_symbols=fetched, start=start, end=end)
+        _atomic_write_parquet(merged, output_path, index=False)
+        done += len(batch)
+        elapsed = time.monotonic() - started_at
+        eta = elapsed / done * (len(symbols) - done) if done < len(symbols) else None
+        print(
+            f"distributions: completed {done}/{len(symbols)}, events {len(merged)}, "
+            f"failed {len(failed)}, no_data {len(no_data)}, eta {_format_duration(eta)}"
+        )
+    return merged, sorted(failed), sorted(no_data), other_actions
+
+
 def _download_yahoo_signal(
     symbols: list[str],
     *,
@@ -622,9 +777,12 @@ def _download_yahoo_signal(
     output_path: Path,
     progress_path: Path,
     progress: dict[str, object],
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+    distributions: pd.DataFrame,
+    distribution_path: Path,
+) -> tuple[pd.DataFrame, list[str], list[str], pd.DataFrame]:
     yf = _load_yfinance()
     merged = existing.copy()
+    merged_distributions = _normalize_distributions(distributions)
     section = dict(progress["yahoo"])
     completed = set(section.get("completed_symbols", []))
     failed = set(section.get("failed_symbols", []))
@@ -634,21 +792,17 @@ def _download_yahoo_signal(
     started_at = time.monotonic()
     for batch in batches:
         parts: list[pd.DataFrame] = []
+        event_parts: list[pd.DataFrame] = []
+        fetched: set[str] = set()
         for symbol in batch:
             yahoo_ticker = f"{symbol}.KS"
             try:
-                data = yf.download(
-                    tickers=yahoo_ticker,
-                    start=start.strftime("%Y-%m-%d"),
-                    end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-                    interval="1d",
-                    auto_adjust=False,
-                    actions=False,
-                    progress=False,
-                    threads=False,
-                    group_by="column",
-                )
-                frame = _extract_adj_close(data, [yahoo_ticker])
+                data = _download_yahoo_history(yf, symbol, start=start, end=end)
+                price_rows, events = _split_yahoo_actions(data, symbol)
+                frame = _extract_adj_close(price_rows, [yahoo_ticker])
+                if not data.empty:
+                    fetched.add(symbol)
+                    event_parts.append(events)
                 if symbol in frame.columns:
                     parts.append(frame[[symbol]])
                     failed.discard(symbol)
@@ -666,6 +820,13 @@ def _download_yahoo_signal(
         else:
             merged = _merge_signal(merged, pd.DataFrame())
         _atomic_write_parquet(merged, output_path)
+        incoming_events = (
+            pd.concat(event_parts, ignore_index=True) if event_parts else pd.DataFrame(columns=DISTRIBUTION_COLUMNS)
+        )
+        merged_distributions = _merge_distributions(
+            merged_distributions, incoming_events, fetched_symbols=fetched, start=start, end=end
+        )
+        _atomic_write_parquet(merged_distributions, distribution_path, index=False)
 
         elapsed = float(section.get("elapsed_seconds", 0.0)) + (time.monotonic() - started_at)
         total = len(symbols)
@@ -690,7 +851,7 @@ def _download_yahoo_signal(
             f"eta {_format_duration(eta)}"
         )
         started_at = time.monotonic()
-    return merged, sorted(failed), sorted(no_data)
+    return merged, sorted(failed), sorted(no_data), merged_distributions
 
 
 def _merge_pykrx(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
@@ -774,6 +935,7 @@ def _write_report(
     pykrx_fetch_start: pd.Timestamp,
     yahoo_fetch_start: pd.Timestamp,
     end: pd.Timestamp,
+    distributions: pd.DataFrame,
 ) -> None:
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -799,16 +961,78 @@ def _write_report(
             "failed_symbols": yahoo_failed,
             "no_data_symbols": yahoo_no_data,
         },
+        "yahoo_distributions": _distribution_summary(distributions),
         "outputs": {
             "ohlcv_pykrx": str(out_dir / "ohlcv_pykrx.parquet"),
             "signal_price_yahoo": str(out_dir / "signal_price_yahoo.parquet"),
+            "distributions_yahoo": str(out_dir / DISTRIBUTION_FILE),
             "download_report": str(out_dir / "download_report.json"),
         },
     }
+    previous = _read_report(out_dir)
+    if "distribution_backfill" in previous.get("yahoo_distributions", {}):
+        report["yahoo_distributions"]["distribution_backfill"] = previous["yahoo_distributions"]["distribution_backfill"]
     (out_dir / "download_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _read_report(out_dir: Path) -> dict[str, object]:
+    path = out_dir / "download_report.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _distribution_summary(distributions: pd.DataFrame) -> dict[str, object]:
+    return {
+        "events": int(len(distributions)),
+        "symbols": int(distributions["Symbol"].nunique()) if not distributions.empty else 0,
+        "start": distributions["Date"].min().date().isoformat() if not distributions.empty else None,
+        "end": distributions["Date"].max().date().isoformat() if not distributions.empty else None,
+    }
+
+
+def _run_distribution_backfill(args: argparse.Namespace, symbols: list[str], out_dir: Path) -> int:
+    if args.update or args.resume:
+        raise SystemExit("--distributions-only fetches --start..--end; do not combine it with --update or --resume")
+    start = pd.Timestamp(args.start).normalize()
+    end = _resolve_fetch_end(args.end)
+    if start > end:
+        raise SystemExit("Fetch start is after fetch end")
+    path = out_dir / DISTRIBUTION_FILE
+    distributions, failed, no_data, other_actions = _download_yahoo_distributions(
+        symbols,
+        start=start,
+        end=end,
+        batch_size=int(args.yahoo_batch_size),
+        existing=_read_existing_distributions(path),
+        output_path=path,
+    )
+    report = _read_report(out_dir)
+    summary = _distribution_summary(distributions)
+    summary["distribution_backfill"] = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "start": start.date().isoformat(),
+        "end": end.date().isoformat(),
+        "symbols_requested": len(symbols),
+        "failed_symbols": failed,
+        "no_data_symbols": no_data,
+        "nonzero_capital_gains_or_splits": other_actions,
+    }
+    report["yahoo_distributions"] = summary
+    report.setdefault("outputs", {})["distributions_yahoo"] = str(path)
+    (out_dir / "download_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Wrote {path}")
+    print(f"distribution events: {summary['events']} symbols: {summary['symbols']} "
+          f"{summary['start']} -> {summary['end']}")
+    print(f"yahoo failed: {len(failed)} no data: {len(no_data)} "
+          f"nonzero capital gains/splits rows: {len(other_actions)}")
+    return 1 if failed else 0
 
 
 def main() -> int:
@@ -826,8 +1050,17 @@ def main() -> int:
     symbols = _load_symbols(master_file, selected_symbols)
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.distributions_only:
+        return _run_distribution_backfill(args, symbols, out_dir)
     pykrx_path = out_dir / "ohlcv_pykrx.parquet"
     signal_path = out_dir / "signal_price_yahoo.parquet"
+    distribution_path = out_dir / DISTRIBUTION_FILE
+    if args.update and not distribution_path.exists():
+        raise SystemExit(
+            f"{distribution_path} is missing; an --update run only fetches recent distributions. "
+            "Run once with --distributions-only to fetch the history first."
+        )
+    existing_distributions = _read_existing_distributions(distribution_path)
 
     existing_pykrx = _read_existing_pykrx(pykrx_path)
     existing_signal = _read_existing_signal(signal_path)
@@ -892,7 +1125,7 @@ def main() -> int:
     )
     progress["phase"] = "yahoo"
     _write_progress(progress_path, progress)
-    signal_frame, yahoo_failed, yahoo_no_data = _download_yahoo_signal(
+    signal_frame, yahoo_failed, yahoo_no_data, distributions = _download_yahoo_signal(
         symbols,
         start=yahoo_fetch_start,
         end=end,
@@ -901,11 +1134,14 @@ def main() -> int:
         output_path=signal_path,
         progress_path=progress_path,
         progress=progress,
+        distributions=existing_distributions,
+        distribution_path=distribution_path,
     )
     _validate_cross_source_recency(pykrx_frame, signal_frame)
 
     _atomic_write_parquet(pykrx_frame, pykrx_path, index=False)
     _atomic_write_parquet(signal_frame, signal_path)
+    _atomic_write_parquet(distributions, distribution_path, index=False)
     progress["phase"] = "completed"
     _write_progress(progress_path, progress)
     _write_report(
@@ -921,6 +1157,7 @@ def main() -> int:
         pykrx_fetch_start=pykrx_fetch_start,
         yahoo_fetch_start=yahoo_fetch_start,
         end=end,
+        distributions=distributions,
     )
 
     print(f"Updated Korean ETF raw price caches in {out_dir}")
@@ -930,6 +1167,7 @@ def main() -> int:
         f"{pykrx_frame['Symbol'].nunique() if not pykrx_frame.empty else 0}"
     )
     print(f"yahoo signal rows: {signal_frame.shape[0]} symbols: {signal_frame.shape[1]}")
+    print(f"yahoo distribution events: {len(distributions)}")
     print(f"pykrx failed dates: {len(pykrx_failed_dates)}")
     print(f"pykrx no-data dates: {len(pykrx_no_data_dates)}")
     print(f"yahoo failed: {len(yahoo_failed)}")

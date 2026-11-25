@@ -73,41 +73,96 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Base output directory (default data/<exchange>)",
     )
+    parser.add_argument(
+        "--new-markets-only",
+        action="store_true",
+        help=(
+            "Download only markets without a saved daily file holding at least one candle, with their full "
+            "history; saved files are left as they are. A market with no candle yet gets no file and is "
+            "retried on the next run. Files are always rewritten whole, so --days with a saved directory "
+            "would replace each market's history and its first candle (the listing day)."
+        ),
+    )
     return parser
+
+
+def has_candles(path: Path) -> bool:
+    """True when the daily CSV exists and holds at least one data row."""
+    if not path.exists():
+        return False
+    with path.open("r", encoding="utf-8-sig") as handle:
+        return sum(1 for _ in zip(range(2), handle)) >= 2
+
+
+def collect(
+    exchange: str,
+    out_dir: Path,
+    *,
+    quote: str = "KRW",
+    days: int | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    pause_seconds: float = DEFAULT_PAUSE_SECONDS,
+    include_warnings: bool = True,
+    markets_filter: set[str] | None = None,
+    max_markets: int | None = None,
+    new_markets_only: bool = False,
+    log=print,
+) -> dict[str, list[str]]:
+    """Save per-market daily candles under out_dir/daily and the market list as out_dir/markets.csv.
+
+    Returns the markets listed, downloaded (file written) and waiting (new market without a candle yet).
+    """
+    if new_markets_only and days is not None:
+        raise ValueError("--new-markets-only downloads full histories; do not combine it with --days")
+    base_url = EXCHANGE_BASE_URLS[exchange]
+    daily_dir = out_dir / "daily"
+    markets = list_markets(quote=quote, include_warnings=include_warnings, base_url=base_url)
+    if markets_filter:
+        markets = [market for market in markets if market.market in markets_filter]
+    if max_markets is not None:
+        markets = markets[:max_markets]
+
+    write_market_manifest(out_dir / "markets.csv", markets)
+    log(f"Found {len(markets)} {quote.upper()} markets")
+    if new_markets_only:
+        markets = [market for market in markets if not has_candles(daily_dir / f"{market.market}.csv")]
+        log(f"New markets without saved candles: {len(markets)}")
+
+    downloaded, waiting = [], []
+    for idx, market in enumerate(markets, start=1):
+        candles = collect_daily_candles(
+            market=market,
+            days=days,
+            batch_size=batch_size,
+            pause_seconds=pause_seconds,
+            base_url=base_url,
+        )
+        if new_markets_only and not candles:
+            waiting.append(market.market)
+            log(f"[{idx}/{len(markets)}] {market.market}: no candle yet")
+            continue
+        row_count = write_candles_csv(daily_dir / f"{market.market}.csv", candles)
+        downloaded.append(market.market)
+        log(f"[{idx}/{len(markets)}] {market.market}: saved {row_count} rows")
+    return {"downloaded": downloaded, "waiting": waiting}
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-
-    out_dir = Path(args.out_dir or f"data/{args.exchange}")
-    base_url = EXCHANGE_BASE_URLS[args.exchange]
-    daily_dir = out_dir / "daily"
-    markets = list_markets(
+    allowed = {market.strip().upper() for market in args.markets.split(",") if market.strip()} or None
+    collect(
+        args.exchange,
+        Path(args.out_dir or f"data/{args.exchange}"),
         quote=args.quote,
+        days=args.days,
+        batch_size=args.batch_size,
+        pause_seconds=args.pause_seconds,
         include_warnings=not args.exclude_warnings,
-        base_url=base_url,
+        markets_filter=allowed,
+        max_markets=args.max_markets,
+        new_markets_only=args.new_markets_only,
     )
-
-    if args.markets:
-        allowed = {market.strip().upper() for market in args.markets.split(",") if market.strip()}
-        markets = [market for market in markets if market.market in allowed]
-    if args.max_markets is not None:
-        markets = markets[: args.max_markets]
-
-    write_market_manifest(out_dir / "markets.csv", markets)
-    print(f"Found {len(markets)} {args.quote.upper()} markets")
-
-    for idx, market in enumerate(markets, start=1):
-        candles = collect_daily_candles(
-            market=market,
-            days=args.days,
-            batch_size=args.batch_size,
-            pause_seconds=args.pause_seconds,
-            base_url=base_url,
-        )
-        row_count = write_candles_csv(daily_dir / f"{market.market}.csv", candles)
-        print(f"[{idx}/{len(markets)}] {market.market}: saved {row_count} rows")
 
 
 if __name__ == "__main__":

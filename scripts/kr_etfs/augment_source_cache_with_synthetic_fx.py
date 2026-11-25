@@ -229,7 +229,12 @@ def _augment_cache(
     common_index = pd.DatetimeIndex(sorted(set(trade_price.index) | set(signal_price.index)))
     synthetic_price = synthetic_price.reindex(common_index).ffill()
 
-    for name in ("trade_price", "signal_price"):
+    # total_return_price (when the source has it): the synthetic market pays no distributions, so it
+    # gets the same synthetic price as trade_price.
+    price_frames = ["trade_price", "signal_price"]
+    if (source_dir / "total_return_price.parquet").exists():
+        price_frames.append("total_return_price")
+    for name in price_frames:
         frame = _read_cache_frame(source_dir / f"{name}.parquet").reindex(common_index)
         _append_column(frame, symbol, synthetic_price).to_parquet(out_dir / f"{name}.parquet")
 

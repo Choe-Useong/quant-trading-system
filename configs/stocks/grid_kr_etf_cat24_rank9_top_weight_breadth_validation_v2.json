@@ -8,7 +8,7 @@
   "save_run_artifacts": false,
   "shared_feature_spec_template": [
     {
-      "source": "signal_price",
+      "source": "total_return_price",
       "steps": [
         { "kind": "simple_return", "params": { "window": 1 } },
         { "kind": "cross_rank", "params": { "descending": true } },
@@ -23,7 +23,7 @@
         {
           "kind": "corr_greedy_filter",
           "params": {
-            "price_feature": "signal_price",
+            "price_feature": "total_return_price",
             "liquidity_feature": "candle_acc_trade_price",
             "threshold": 0.95,
             "corr_window": 252,
@@ -44,7 +44,7 @@
       "column_name": "liquidity_prev_month_avg"
     },
     {
-      "source": "signal_price",
+      "source": "total_return_price",
       "steps": [
         { "kind": "period_simple_return", "params": { "freq": "M", "periods": 3, "signal_timing": "next_period" } }
       ],
@@ -105,7 +105,7 @@
     "universe_name": "{run_name}"
   },
   "vectorbt_spec_template": {
-    "price_column": "trade_price",
+    "price_column": "total_return_price",
     "fees": 0.0005,
     "slippage": 0.0,
     "benchmark_market": "PORTFOLIO_GROUP_REBALANCE",

@@ -399,7 +399,8 @@ py scripts/research/analyze_time_series_features_v2.py --source-cache-dir data/f
 | source | 의미 |
 |---|---|
 | `trade_price` | 백테스트/거래 기준 가격 |
-| `signal_price` | 신호 계산용 가격. 환산가격과 거래가격을 분리할 때 쓴다. |
+| `total_return_price` | 국내 ETF 캐시(`kr_etf_daily`) 전용. KRX 종가에 분배금을 재투자한 총수익 가격. 백테스트 `price_column`과 피처 원천(`source`, `price_feature`)으로 쓸 수 있고, 주문 가격은 `trade_price`다. 아래 "국내 ETF 캐시와 분배금" 참조 |
+| `signal_price` | 신호 계산용 가격. 환산가격과 거래가격을 분리할 때 쓴다(해외 ETF 캐시: 원화 환산 `trade_price`, 현지 통화 `signal_price`). 국내 ETF 캐시의 값은 Yahoo 수정종가이며 결함이 있어(DATA-021) `total_return_price`를 쓴다. |
 | `index_price` | 지수 벤치마크 가격 |
 | `opening_price`, `high_price`, `low_price` | OHLC 보조 가격 |
 | `candle_acc_trade_volume` | 거래량 |
@@ -1372,7 +1373,7 @@ PBO·SPA(`scripts/research/analyze_pbo.py`, `analyze_spa.py`, 워크포워드 �
 
 | 키 | 의미 |
 |---|---|
-| `price_column` | 백테스트 수익률 계산 가격 |
+| `price_column` | 백테스트 수익률 계산 가격. 국내 ETF 캐시는 분배금이 들어간 `total_return_price`를 쓴다(`trade_price`는 분배금 누락, DATA-020) |
 | `fees` | 거래 수수료 |
 | `slippage` | 슬리피지 |
 | `benchmark_market` | 단일 벤치마크 종목 또는 portfolio group benchmark 이름 |
@@ -2910,6 +2911,38 @@ py scripts/kr_stocks/build_kr_stock_source_cache.py --include-industry --industr
 당일 행은 KST `--krx-final-time`(기본 20:30) 이후에만 저장한다. 수정계수는 `기준가(종가 − 대비) ÷ 전일 종가`이며 거래정지 후 재상장일은 KRX 시초가 경매 기준가를 쓰므로 그날 가격 차이는 수익률에 들어가지 않는다. 현금배당은 수정하지 않는다. 이벤트 목록은 `krx_adjust_events.json`에 남는다.
 `krx`는 상장폐지 종목을 포함하지만, 재무 캐시와 `common_share_flag`는 재무 원천을 수집한 종목에만 값이 있다(DATA-019).
 
+### 국내 ETF 캐시와 분배금 (`total_return_price`)
+
+`scripts/kr_etfs/build_kr_etf_source_cache.py`는 `trade_price`(pykrx 종가) 옆에 `total_return_price`를 만든다.
+각 ETF의 첫 종가에서 시작해 종가 행마다 `(종가 + 그 행의 분배금) ÷ 직전 종가`를 곱한다. 분배금을 분배락일
+종가로 같은 ETF에 재투자한 것과 같고, 이후 행이 붙어도 과거 값은 바뀌지 않는다. 국내 ETF 백테스트는
+`"price_column": "total_return_price"`를 쓴다. 포트폴리오형 벤치마크도 같은 가격을 쓴다. 신호(피처 `source`,
+`price_feature`, `compare.left_feature`, `market:종목:` 참조)도 같은 가격으로 계산한다. 라이브 주문 가격과 수량은
+`trade_price`로 정한다. 같은 캐시의 `signal_price`(Yahoo 수정종가)는 갱신 방식 결함과 Yahoo 오류가 있어(DATA-021)
+국내 ETF config에서 쓰지 않는다. 생성은 계속하며 다른 캐시를 만드는 스크립트가 읽는다.
+
+- 분배금 원천: `data/kr_etfs/raw/distributions_yahoo.parquet`(`Date`, `Symbol`, `Amount` = 주당 원).
+  `update_kr_etf_raw_prices.py`가 Yahoo 수정종가와 같은 요청(`actions=True`)에서 받는다. 분배금만 있고 가격이 없는
+  Yahoo 행은 수정종가 파일에 넣지 않는다. `--update`는 수정종가와 같은 최근 구간만 받으므로, 파일이 없으면
+  중단하고 `--distributions-only`로 과거 이력을 먼저 받게 한다(`--start`~`--end` 구간을 종목별로 교체, 가격 파일은 건드리지 않음).
+  캐시 빌드도 이 파일이 없으면 오류로 멈춘다.
+- 적용 행: Yahoo 날짜에 그 ETF 종가가 있으면 그날, KRX 휴장일이면 그 ETF의 직전 종가 행, 거래일인데 그 ETF 종가가 없으면
+  (거래정지 등) 다음 종가 행. 첫 종가 행 이전·마지막 종가 이후·캐시에 없는 종목의 분배금은 적용하지 않고 수를 남긴다.
+- 가격 확인과 제외: 분배금 비율 = 분배금 ÷ 직전 종가, 초과수익 = ETF 수익률 − 기초지수(IndexValue) 수익률,
+  잡음 = 직전 250행의 |초과수익| 중앙값(20개 이상, 현재 행 제외)이다. 비율이 잡음의 4배 이상이면 가격으로 확인할 수 있다고 보고,
+  적용 행이나 그 ETF의 직전 종가 행에서 ETF 수익률 또는 초과수익이 `−0.5 × 비율` 이하이면 확인(`applied_confirmed`)한다.
+  ETF 수익률도 보는 것은 편입 종목 배당락일과 겹쳐 가격지수가 함께 떨어지는 경우 때문이다.
+  확인할 수 있는데 어느 쪽도 그만큼 떨어지지 않았으면 제외(`excluded_contradicted`)한다.
+  비율이 작아 확인할 수 없으면(`applied_small`) 또는 지수·잡음 이력이 없으면(`applied_no_check`) 적용하되,
+  확인되지 않은 분배금이 30%를 넘으면 제외(`excluded_implausible`)한다. 판정은 그 행까지의 데이터만 쓴다.
+  결과는 `source_cache_report.json`의 `distributions`(규칙별 수, `status`별 수, 제외 목록 `excluded_bars`)에 남는다.
+- 한계: 실제 분배금은 지급일에 현금으로 들어와 다음 매매 전까지 현금으로 남지만 여기서는 분배락일 종가로 재투자한다.
+  세전 금액이다. Yahoo가 날짜를 틀리게 기록한 실제 분배금은 그 날짜에 가격 하락이 없어 제외될 수 있다
+  (예: KOSPI200 ETF의 2022년 7월 분배금이 10-27로 기록). 작은 분배금의 날짜 오류·누락은 걸러지지 않는다.
+  Yahoo 분배금은 2007년 이후만 있다.
+- `augment_source_cache_with_synthetic_fx.py`는 원본 캐시에 `total_return_price`가 있으면 합성 종목을 붙여 함께 복사한다
+  (합성 종목은 분배금이 없어 `trade_price`와 같다).
+
 ## Grid 작성 규칙
 
 `grid`에는 단순값만 넣는 것이 안전하다.
@@ -3076,7 +3109,7 @@ BTC 헤지를 더한 후속 대상은 586종목이었다. 48개 후보가 하나
   "run_name_template": "example_rank9_top{top_n}_v2",
   "shared_feature_spec_template": [
     {
-      "source": "signal_price",
+      "source": "total_return_price",
       "steps": [
         { "kind": "simple_return", "params": { "window": 1 } },
         { "kind": "cross_rank", "params": { "descending": true } },
@@ -3101,7 +3134,7 @@ BTC 헤지를 더한 후속 대상은 586종목이었다. 48개 후보가 하나
     "universe_name": "{run_name}"
   },
   "vectorbt_spec_template": {
-    "price_column": "trade_price",
+    "price_column": "total_return_price",
     "fees": 0.0005,
     "slippage": 0.0,
     "benchmark_market": "PORTFOLIO_GROUP_REBALANCE",
