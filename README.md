@@ -6,9 +6,9 @@
 >
 > 시스템 구조와 전략 연구·백테스트 결과를 정리한 포트폴리오입니다. 실제 운용 설정, 계좌 정보, 원천 데이터 및 주문·체결 기록은 포함하지 않습니다.
 
-**백테스트:** [4개 전략 요약](notes/strategy_summary.md) · [전략 명세·성과·검증 상세](notes/strategy_examples.md)
+**시스템:** [기능 목록](notes/feature_inventory.md) · [사용·운영 방식](notes/system_operations.md) · [AI 협업 방식](notes/ai_collaboration.md) · [데이터 편향과 미래 정보 처리](notes/data_bias_and_lookahead.md) · [설정 레퍼런스](notes/config_reference_v2.md)
 
-**시스템:** [사용·운영 방식](notes/system_operations.md) · [AI 협업 방식](notes/ai_collaboration.md) · [데이터 편향과 미래 정보 처리](notes/data_bias_and_lookahead.md) · [기능 목록](notes/feature_inventory.md) · [설정 레퍼런스](notes/config_reference_v2.md)
+**백테스트:** [4개 전략 요약](notes/strategy_summary.md) · [전략 명세·성과·검증 상세](notes/strategy_examples.md)
 
 ## 전체 구조
 
