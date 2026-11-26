@@ -6,16 +6,9 @@
 >
 > 시스템 구조와 전략 연구·백테스트 결과를 정리한 포트폴리오입니다. 실제 운용 설정, 계좌 정보, 원천 데이터 및 주문·체결 기록은 포함하지 않습니다.
 
-**역할과 협업 방식**
-
-- 구현·테스트·문서 작성은 AI 코딩 에이전트(Claude Code)가 담당하고, 실험 요청·설계, 채택·보류 결정, 작업 규칙 설계는 직접 담당함
-- 실험 설계: 거래대금·수익률 분위 그룹으로 72개 롱숏 조합을 비교하는 실험을 설계함. 최상위 조합이 선물 전략의 기반이 됨
-- 채택 판단: 이벤트 수익이 최근 기간에 집중된 전략은 실계좌에 바로 넣지 않고 데모 계좌에서 전진 검증함
-- 검토 방식: 코드는 직접 읽지 않고, 수정 전 승인 규칙과 여러 층의 검증(손계산, 외부 도구 대조, 미래 정보 차단 점검, 실운영 비교)으로 결과를 확인함 → [자세히](notes/system_operations.md#5-개발-방식과-품질-관리)
-
 **백테스트:** [4개 전략 요약](notes/strategy_summary.md) · [전략 명세·성과·검증 상세](notes/strategy_examples.md)
 
-**시스템:** [사용·운영 방식](notes/system_operations.md) · [기능 목록](notes/feature_inventory.md) · [설정 레퍼런스](notes/config_reference_v2.md)
+**시스템:** [사용·운영 방식](notes/system_operations.md) · [AI 협업 방식](notes/ai_collaboration.md) · [데이터 편향과 미래 정보 처리](notes/data_bias_and_lookahead.md) · [기능 목록](notes/feature_inventory.md) · [설정 레퍼런스](notes/config_reference_v2.md)
 
 ## 전체 구조
 
@@ -44,6 +37,8 @@
 | 문서 | 설명 |
 | --- | --- |
 | [시스템 사용·운영 방식](notes/system_operations.md) | 백테스트 작업 흐름, 운영 절차, 알림, 예외 상황별 동작, 개발·품질 관리 규칙 |
+| [AI 협업 방식](notes/ai_collaboration.md) | 사람과 AI 코딩 에이전트의 역할 분담, 결정 방식, 판단 사례, 검토 방식과 한계 |
+| [데이터 편향과 미래 정보 처리](notes/data_bias_and_lookahead.md) | 생존편향·미래 정보 누수·원천 데이터 오류의 처리 방식과 남은 한계 |
 | [기능 목록](notes/feature_inventory.md) | 구현된 연구·검증·라이브 기능 |
 | [설정 파일 레퍼런스](notes/config_reference_v2.md) | 전략 설정 옵션 |
 | [4개 전략 요약](notes/strategy_summary.md) | 4개 전략의 신호·비중·성과·검증 결과를 한눈에 비교 |
